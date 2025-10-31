@@ -30,6 +30,35 @@
         cursor: text;
         transform-origin: 0% 0%;
       }
+      @keyframes fade-out-highlight {
+        0%, 70% { /* Hold color for ~2.8s */
+          background-color: rgba(253, 224, 71, 0.7); /* yellow-300 */
+          box-shadow: 0 0 5px rgba(253, 224, 71, 0.9);
+        }
+        100% {
+          background-color: transparent;
+          box-shadow: 0 0 5px transparent;
+        }
+      }
+
+      .temporary-highlight {
+        animation: fade-out-highlight 4s ease-out forwards;
+        border-radius: 2px;
+        pointer-events: none;
+      }
+
+      .search-highlight {
+        position: absolute;
+        background-color: rgba(250, 204, 21, 0.4); /* yellow-400 */
+        border-radius: 2px;
+        pointer-events: none;
+        transition: background-color 0.3s ease;
+      }
+      .current-search-highlight {
+        background-color: rgba(249, 115, 22, 0.6); /* orange-500 */
+        box-shadow: 0 0 3px rgba(249, 115, 22, 0.8);
+        z-index: 10;
+      }
     </style>
   <script type="importmap">
 {

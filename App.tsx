@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { DocumentInput } from './components/DocumentInput';
 import { VoiceReviewer } from './components/VoiceReviewer';
 import { PdfViewer } from './components/PdfViewer';
@@ -15,12 +15,30 @@ export default function App() {
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
   const [error, setError] = useState<string>('');
   const [view, setView] = useState<'input' | 'review'>('input');
+  const [highlightText, setHighlightText] = useState<string | null>(null);
+
+  const highlightTimeoutRef = useRef<number | null>(null);
+
+  const triggerTempHighlight = (text: string | null) => {
+    if (highlightTimeoutRef.current) {
+        clearTimeout(highlightTimeoutRef.current);
+    }
+    if (!text) {
+        setHighlightText(null);
+        return;
+    }
+    setHighlightText(text);
+    highlightTimeoutRef.current = window.setTimeout(() => {
+        setHighlightText(null);
+    }, 4000); // Highlight lasts for 4 seconds
+  };
 
   const handleDocumentSubmit = async (data: string | File) => {
     setIsProcessing(true);
     setError('');
     setDocumentText('');
     setPdfFile(null);
+    triggerTempHighlight(null);
 
     try {
       if (typeof data === 'string') {
@@ -57,6 +75,7 @@ export default function App() {
     setPdfFile(null);
     setError('');
     setView('input');
+    triggerTempHighlight(null);
   };
 
   const renderReviewView = () => {
@@ -65,7 +84,7 @@ export default function App() {
      if (pdfFile) {
         return (
             <div className="rounded-xl shadow-md border border-gray-200 h-full overflow-hidden">
-                <PdfViewer file={pdfFile} />
+                <PdfViewer file={pdfFile} highlightText={highlightText} />
             </div>
         );
      }
@@ -120,7 +139,7 @@ export default function App() {
       </main>
 
       {view === 'review' && !isProcessing && documentText && (
-          <VoiceReviewer documentText={documentText} />
+          <VoiceReviewer documentText={documentText} setHighlightText={triggerTempHighlight} />
       )}
     </div>
   );

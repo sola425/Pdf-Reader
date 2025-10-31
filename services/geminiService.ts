@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type, Modality, LiveServerMessage } from "@google/genai";
+import { GoogleGenAI, Type, Modality, LiveServerMessage, Chat } from "@google/genai";
 import type { ReviewResult } from '../types';
 import { encode } from '../utils/audio';
 
@@ -36,9 +36,16 @@ const reviewSchema = {
                     suggestion: {
                         type: Type.STRING,
                         description: "Actionable advice or a related topic for further study based on the missed point. For example, if a user missed a detail about photosynthesis, suggest they review 'the Calvin Cycle'."
+                    },
+                    relatedConcepts: {
+                        type: Type.ARRAY,
+                        description: "A list of 2-3 related concepts or keywords that the user could study to deepen their understanding of the missed point.",
+                        items: {
+                            type: Type.STRING
+                        }
                     }
                 },
-                required: ["point", "example", "suggestion"]
+                required: ["point", "example", "suggestion", "relatedConcepts"]
             }
         }
     },
@@ -63,6 +70,7 @@ export async function getReview(documentText: string, userSummary: string): Prom
     3.  Provide a brief, positive summary of the key points the user correctly mentioned.
     4.  Identify the key points or important details from the original document that the user missed in their summary. For each missed point, provide a specific, brief quote or example from the original document that directly illustrates it.
     5.  For each missed point, also provide an actionable suggestion to help the user improve. This could be a recommendation to review a specific section, a related concept to study, or a question to consider that would lead them to the correct understanding.
+    6.  For each missed point, provide a list of 2-3 'relatedConcepts'. These should be keywords or topics related to the missed point that the user can research for deeper understanding.
   `;
 
   const response = await ai.models.generateContent({
@@ -83,6 +91,44 @@ export async function getReview(documentText: string, userSummary: string): Prom
     throw new Error("The AI returned an invalid response. Please try again.");
   }
 }
+
+export function startPageChatSession(contextText: string): Chat {
+    const systemInstruction = `You are a helpful study assistant. Your knowledge is strictly limited to the following text provided by the user. Answer the user's questions based only on this provided context. If the answer cannot be found in the text, clearly state that you do not have that information. Do not use any outside knowledge.
+
+    --- DOCUMENT CONTEXT ---
+    ${contextText}
+    --- END OF CONTEXT ---`;
+    
+    return ai.chats.create({
+      model: 'gemini-2.5-flash',
+      config: {
+        systemInstruction,
+      },
+    });
+}
+
+export async function generateSpeech(text: string): Promise<string | null> {
+    try {
+        const response = await ai.models.generateContent({
+            model: "gemini-2.5-flash-preview-tts",
+            contents: [{ parts: [{ text: `Say with a helpful and clear tone: ${text}` }] }],
+            config: {
+                responseModalities: [Modality.AUDIO],
+                speechConfig: {
+                    voiceConfig: {
+                        prebuiltVoiceConfig: { voiceName: 'Kore' }, // A clear, friendly voice
+                    },
+                },
+            },
+        });
+        const base64Audio = response.candidates?.[0]?.content?.parts?.[0]?.inlineData?.data;
+        return base64Audio || null;
+    } catch(e) {
+        console.error("Speech generation failed:", e);
+        return null;
+    }
+}
+
 
 const workletCode = `
 class AudioSenderProcessor extends AudioWorkletProcessor {

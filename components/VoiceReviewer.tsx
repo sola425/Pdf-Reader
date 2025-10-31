@@ -1,17 +1,18 @@
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import type { ReviewResult } from '../types';
 import { getReview, createLiveSession } from '../services/geminiService';
-import { MicrophoneIcon, StopIcon, CheckCircleIcon, XCircleIcon, LightbulbIcon, ChevronUpIcon, ChevronDownIcon } from './Icons';
+import { MicrophoneIcon, StopIcon, CheckCircleIcon, XCircleIcon, LightbulbIcon, ChevronUpIcon, ChevronDownIcon, AcademicCapIcon } from './Icons';
 import { Loader } from './Loader';
 import { AudioVisualizer } from './AudioVisualizer';
 
 interface VoiceReviewerProps {
   documentText: string;
+  setHighlightText: (text: string | null) => void;
 }
 
 type RecordingState = 'idle' | 'recording' | 'processing' | 'complete' | 'error';
 
-export function VoiceReviewer({ documentText }: VoiceReviewerProps) {
+export function VoiceReviewer({ documentText, setHighlightText }: VoiceReviewerProps) {
   const [recordingState, setRecordingState] = useState<RecordingState>('idle');
   const [transcription, setTranscription] = useState<string>('');
   const [reviewResult, setReviewResult] = useState<ReviewResult | null>(null);
@@ -88,12 +89,13 @@ export function VoiceReviewer({ documentText }: VoiceReviewerProps) {
     setError('');
     finalTranscriptRef.current = '';
     interimTranscriptRef.current = '';
+    setHighlightText(null);
     setRecordingState('recording');
 
     try {
       const { session, stream, context, workletNode, source } = await createLiveSession({
         onTranscriptionUpdate: (textChunk) => {
-            interimTranscriptRef.current += textChunk;
+            interimTranscriptRef.current = textChunk;
             setTranscription(finalTranscriptRef.current + interimTranscriptRef.current);
         },
         onTurnComplete: () => {
@@ -140,7 +142,7 @@ export function VoiceReviewer({ documentText }: VoiceReviewerProps) {
       case 'processing':
         return <div className="text-center"><Loader /><p className="mt-4 text-slate-600">Analyzing your review...</p></div>;
       case 'complete':
-        return reviewResult && <ReviewDisplay result={reviewResult} />;
+        return reviewResult && <ReviewDisplay result={reviewResult} setHighlightText={setHighlightText} />;
       case 'error':
         return <div className="text-center p-4 bg-red-50 border border-red-200 rounded-lg"><p className="text-red-700 font-semibold">Error</p><p className="text-red-600 mt-1">{error}</p></div>;
       case 'idle':
@@ -216,7 +218,12 @@ export function VoiceReviewer({ documentText }: VoiceReviewerProps) {
   );
 }
 
-const ReviewDisplay = ({ result }: { result: ReviewResult }) => {
+interface ReviewDisplayProps {
+    result: ReviewResult;
+    setHighlightText: (text: string | null) => void;
+}
+
+const ReviewDisplay = ({ result, setHighlightText }: ReviewDisplayProps) => {
     const scoreColor = result.score >= 80 ? 'text-green-600' : result.score >= 50 ? 'text-yellow-600' : 'text-red-600';
 
     return (
@@ -231,9 +238,17 @@ const ReviewDisplay = ({ result }: { result: ReviewResult }) => {
         </div>
         <div>
           <h4 className="font-semibold text-slate-800 flex items-center gap-2"><XCircleIcon className="h-5 w-5 text-red-500" /> Areas to review:</h4>
+          <p className="text-xs text-slate-500 italic mt-1">Click on a card to highlight the corresponding text in the document.</p>
           <ul className="mt-1 text-slate-600 text-sm space-y-3">
             {result.reviewOfMissedPoints.map((item, index) => (
-                <li key={index} className="p-3 bg-red-50 border border-red-200 rounded-md">
+                <li 
+                    key={index} 
+                    onClick={() => setHighlightText(item.example)}
+                    className="p-3 bg-red-50 border border-red-200 rounded-md cursor-pointer hover:bg-red-100 hover:border-red-300 transition-colors"
+                    role="button"
+                    tabIndex={0}
+                    onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setHighlightText(item.example) }}
+                >
                     <div>
                         <p className="font-semibold text-slate-700">{item.point}</p>
                         <blockquote className="mt-1 pl-3 border-l-4 border-red-300 text-red-900/80 italic">
@@ -246,6 +261,21 @@ const ReviewDisplay = ({ result }: { result: ReviewResult }) => {
                             <div>
                                 <h5 className="font-semibold text-sm text-gray-700">Suggestion</h5>
                                 <p className="text-sm text-slate-600">{item.suggestion}</p>
+                            </div>
+                        </div>
+                    )}
+                    {item.relatedConcepts && item.relatedConcepts.length > 0 && (
+                        <div className="mt-3 pt-3 border-t border-red-200 flex items-start gap-2.5">
+                            <AcademicCapIcon className="h-5 w-5 text-blue-500 flex-shrink-0 mt-0.5" />
+                            <div>
+                                <h5 className="font-semibold text-sm text-gray-700">Related Concepts for Further Study</h5>
+                                <div className="flex flex-wrap gap-2 mt-1">
+                                    {item.relatedConcepts.map((concept, i) => (
+                                        <span key={i} className="px-2 py-1 text-xs font-medium text-blue-800 bg-blue-100 rounded-full">
+                                            {concept}
+                                        </span>
+                                    ))}
+                                </div>
                             </div>
                         </div>
                     )}
