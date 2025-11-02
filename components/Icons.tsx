@@ -15,9 +15,14 @@ export const StopIcon = (props: IconProps) => (
 );
 
 export const LogoIcon = (props: IconProps) => (
-  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" {...props}>
-    <path strokeLinecap="round" strokeLinejoin="round" d="M12 6.042A8.967 8.967 0 006 3.75c-1.052 0-2.062.18-3 .512v14.25A8.987 8.987 0 016 18c2.305 0 4.408.867 6 2.292m0-14.25a8.966 8.966 0 016-2.292c1.052 0 2.062.18 3 .512v14.25A8.987 8.987 0 0018 18a8.967 8.967 0 00-6 2.292m0-14.25v14.25" />
-  </svg>
+    <svg viewBox="0 0 48 48" fill="none" xmlns="http://www.w3.org/2000/svg" {...props}>
+        <path d="M21.284 8.788c-3.324-2.216-7.85-2.1-11.02.33-3.79 2.82-5.45 7.7-4.14 11.91 1.77 5.67 7.73 9.4 13.43 8.73 4.2-.5 7.82-3.08 9.55-6.95" stroke="#3b82f6" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"/>
+        <path d="M11.964 12.828a2.5 2.5 0 0 1-.3-4.12 2.5 2.5 0 0 1 4.12.3" stroke="#3b82f6" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"/>
+        <path d="M19.784 38.648c.6-.9.84-2.31.24-3.21-.6-.9-1.99-1.02-3.19-.32-1.2.7-2.13 2-1.93 3 .2 1 .98 1.58 1.98 1.58s2.3-.2 2.9-1.05z" stroke="#3b82f6" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"/>
+        <path d="M22 22c0-2.21 1.79-4 4-4h12a4 4 0 0 1 4 4v18a4 4 0 0 1-4 4H26a4 4 0 0 1-4-4V22z" fill="#dbeafe" stroke="#2563eb" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"/>
+        <path d="M38 18v4h4" stroke="#2563eb" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"/>
+        <path d="M28 29h8m-8 5h8" stroke="#60a5fa" strokeWidth="3" strokeLinecap="round"/>
+    </svg>
 );
 
 export const UploadIcon = (props: IconProps) => (
@@ -127,4 +132,28 @@ export const ChevronDoubleRightIcon = (props: IconProps) => (
   <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" {...props}>
     <path strokeLinecap="round" strokeLinejoin="round" d="M5.25 4.5l7.5 7.5-7.5 7.5m6-15l7.5 7.5-7.5 7.5" />
   </svg>
+);
+
+export const SpeakerWaveIcon = (props: IconProps) => (
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" {...props}>
+      <path strokeLinecap="round" strokeLinejoin="round" d="M19.114 5.636a9 9 0 010 12.728M16.463 8.288a5.25 5.25 0 010 7.424M6.75 8.25l4.72-4.72a.75.75 0 011.28.53v15.88a.75.75 0 01-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.01 9.01 0 012.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75z" />
+    </svg>
+);
+
+export const DownloadIcon = (props: IconProps) => (
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" {...props}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5M16.5 12L12 16.5m0 0L7.5 12m4.5 4.5V3" />
+    </svg>
+);
+
+export const PrinterIcon = (props: IconProps) => (
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" {...props}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M6.72 13.829c-.24.03-.48.062-.72.096m.72-.096a42.415 42.415 0 0110.56 0m-10.56 0L6 18.25m0 0a2.25 2.25 0 01-2.25 2.25m2.25-2.25a2.25 2.25 0 002.25 2.25m-2.25 2.25L6 21m-2.25-2.25a2.25 2.25 0 01-2.25-2.25m12-2.25c.24.03.48.062.72.096m-.72-.096a42.415 42.415 0 00-10.56 0m10.56 0L18 18.25m0 0a2.25 2.25 0 002.25 2.25M18 18.25a2.25 2.25 0 012.25 2.25m-2.25 2.25L18 21m2.25-2.25a2.25 2.25 0 002.25-2.25m-15-6.042A12.022 12.022 0 0112 3c2.634 0 5.14.732 7.276 2.022m-14.552 0a48.47 48.47 0 00-1.256.32l-1.242.324a.75.75 0 00-.518 1.132l2.843 4.264a.75.75 0 001.132.518l1.242-.324a48.47 48.47 0 001.256-.32M16.088 7.373c.053.11.1.223.144.336" />
+    </svg>
+);
+
+export const ArrowPathIcon = (props: IconProps) => (
+    <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" {...props}>
+        <path strokeLinecap="round" strokeLinejoin="round" d="M16.023 9.348h4.992v-.001M2.985 19.644v-4.992m0 0h4.992m-4.993 0l3.181 3.183a8.25 8.25 0 0011.664 0l3.181-3.183m-11.664 0l3.181-3.183a8.25 8.25 0 00-11.664 0l3.181 3.183" />
+    </svg>
 );

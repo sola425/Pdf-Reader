@@ -31,7 +31,9 @@ export function PageChat({ pdfDoc, numPages, currentPage, isOpen, onClose }: Pag
   const liveSessionCleanupRef = useRef<(() => void) | null>(null);
   const outputAudioContextRef = useRef<AudioContext | null>(null);
   const chatContentRef = useRef<HTMLDivElement>(null);
+  // Fix: Add refs for both final and interim transcripts
   const finalTranscriptRef = useRef<string>('');
+  const interimTranscriptRef = useRef<string>('');
 
   useEffect(() => {
     setStartPage(currentPage);
@@ -141,34 +143,56 @@ export function PageChat({ pdfDoc, numPages, currentPage, isOpen, onClose }: Pag
     }
   }, []);
 
+  // Fix: Reworked transcription handling logic to be robust.
+  const stopListeningAndProcess = useCallback(() => {
+    if (chatState !== 'listening') {
+      return;
+    }
+    setChatState('processing_speech');
+    if (liveSessionCleanupRef.current) {
+        liveSessionCleanupRef.current();
+        liveSessionCleanupRef.current = null;
+    }
+    
+    const fullTranscript = (finalTranscriptRef.current + interimTranscriptRef.current).trim();
+
+    // A small delay to ensure the final transcript is captured.
+    setTimeout(() => {
+        processUserSpeech(fullTranscript);
+    }, 100);
+  }, [chatState, processUserSpeech]);
+  
+  // Fix: Reworked transcription handling logic to be robust.
   const startListening = async () => {
     setChatState('listening');
     finalTranscriptRef.current = '';
+    interimTranscriptRef.current = '';
 
     try {
         const { session, stream, context, workletNode, source } = await createLiveSession({
             onTranscriptionUpdate: (textChunk) => {
-                // Not showing interim results for this UI to keep it clean
+                interimTranscriptRef.current = textChunk;
             },
             onTurnComplete: () => {
-                // Since the live session can have multiple turns, we'll just capture the first one.
-                if (finalTranscriptRef.current === '' && session.transcription) {
-                    finalTranscriptRef.current = session.transcription;
-                    stopListeningAndProcess();
-                }
+                finalTranscriptRef.current += interimTranscriptRef.current + ' ';
+                interimTranscriptRef.current = '';
             },
             onError: (err) => {
               console.error('Live session error:', err);
               setError('A recording error occurred.');
               setChatState('context_loaded');
+              if (liveSessionCleanupRef.current) {
+                liveSessionCleanupRef.current();
+                liveSessionCleanupRef.current = null;
+              }
             }
         });
 
         liveSessionCleanupRef.current = () => {
             session.close();
             stream.getTracks().forEach(track => track.stop());
-            workletNode.disconnect();
-            source.disconnect();
+            if (workletNode && workletNode.disconnect) workletNode.disconnect();
+            if (source && source.disconnect) source.disconnect();
             if (context.state !== 'closed') context.close();
         };
 
@@ -177,18 +201,6 @@ export function PageChat({ pdfDoc, numPages, currentPage, isOpen, onClose }: Pag
         setError("Could not access microphone.");
         setChatState('context_loaded');
     }
-  };
-
-  const stopListeningAndProcess = () => {
-    setChatState('processing_speech');
-    if (liveSessionCleanupRef.current) {
-        liveSessionCleanupRef.current();
-        liveSessionCleanupRef.current = null;
-    }
-    // A small delay to ensure the final transcript is captured.
-    setTimeout(() => {
-        processUserSpeech(finalTranscriptRef.current);
-    }, 100);
   };
   
   if (!isOpen) return null;
@@ -205,16 +217,16 @@ export function PageChat({ pdfDoc, numPages, currentPage, isOpen, onClose }: Pag
     }
 
     return (
-        <button onClick={startListening} disabled={isMicDisabled} className="w-16 h-16 bg-indigo-600 text-white rounded-full flex items-center justify-center shadow-lg disabled:bg-slate-400 disabled:cursor-not-allowed">
+        <button onClick={startListening} disabled={isMicDisabled} className="w-16 h-16 bg-blue-600 text-white rounded-full flex items-center justify-center shadow-lg disabled:bg-slate-400 disabled:cursor-not-allowed">
             <MicrophoneIcon className="w-8 h-8" />
         </button>
     );
   };
 
   return (
-    <div className="absolute bottom-4 right-4 w-full max-w-md h-[70vh] max-h-[600px] bg-white rounded-xl shadow-2xl border border-gray-200 flex flex-col z-50 animate-fade-in">
+    <div className="absolute bottom-4 right-4 w-full max-w-md h-[70vh] max-h-[600px] bg-white rounded-2xl shadow-2xl border border-slate-200/80 flex flex-col z-50 animate-fade-in">
         <header className="p-4 border-b border-gray-200 flex items-center justify-between flex-shrink-0">
-            <h2 className="text-lg font-bold text-slate-800">Chat with AI</h2>
+            <h2 className="text-lg font-bold text-slate-800">Chat with Page Content</h2>
             <button onClick={onClose} className="p-1 rounded-full hover:bg-slate-200">
                 <XCircleIcon className="w-6 h-6 text-slate-500" />
             </button>
@@ -223,10 +235,10 @@ export function PageChat({ pdfDoc, numPages, currentPage, isOpen, onClose }: Pag
         <div className="p-4 flex-shrink-0 border-b border-gray-200 bg-slate-50">
             <div className="flex items-center gap-2">
                 <span className="text-sm font-medium text-slate-700">Pages:</span>
-                <input type="number" value={startPage} onChange={e => setStartPage(parseInt(e.target.value, 10))} min={1} max={numPages} className="w-16 p-1 border border-slate-300 rounded-md text-sm" />
+                <input type="number" value={startPage} onChange={e => setStartPage(parseInt(e.target.value, 10))} min={1} max={numPages} className="w-16 p-1 border border-slate-300 rounded-md text-sm focus:ring-1 focus:ring-blue-500" />
                 <span className="text-sm font-medium text-slate-700">-</span>
-                <input type="number" value={endPage} onChange={e => setEndPage(parseInt(e.target.value, 10))} min={1} max={numPages} className="w-16 p-1 border border-slate-300 rounded-md text-sm" />
-                <button onClick={handleLoadContext} disabled={chatState === 'loading_context'} className="px-3 py-1 bg-indigo-100 text-indigo-700 text-sm font-semibold rounded-md hover:bg-indigo-200 disabled:opacity-50">
+                <input type="number" value={endPage} onChange={e => setEndPage(parseInt(e.target.value, 10))} min={1} max={numPages} className="w-16 p-1 border border-slate-300 rounded-md text-sm focus:ring-1 focus:ring-blue-500" />
+                <button onClick={handleLoadContext} disabled={chatState === 'loading_context'} className="px-3 py-1 bg-blue-100 text-blue-700 text-sm font-semibold rounded-md hover:bg-blue-200 disabled:opacity-50">
                     {chatState === 'loading_context' ? 'Loading...' : 'Load Context'}
                 </button>
             </div>
@@ -236,9 +248,9 @@ export function PageChat({ pdfDoc, numPages, currentPage, isOpen, onClose }: Pag
         <div ref={chatContentRef} className="flex-1 p-4 overflow-y-auto space-y-4">
             {chatHistory.map((msg, index) => (
                 <div key={index} className={`flex items-end gap-2 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                   {msg.role === 'model' && <div className="w-6 h-6 rounded-full bg-indigo-500 text-white flex items-center justify-center text-xs font-bold flex-shrink-0">AI</div>}
+                   {msg.role === 'model' && <div className="w-6 h-6 rounded-full bg-blue-600 text-white flex items-center justify-center text-xs font-bold flex-shrink-0">AI</div>}
                    <div className={`max-w-xs md:max-w-sm px-3 py-2 rounded-xl ${
-                       msg.role === 'user' ? 'bg-indigo-500 text-white' : 
+                       msg.role === 'user' ? 'bg-blue-600 text-white' : 
                        msg.role === 'model' ? 'bg-slate-100 text-slate-800' : 'bg-transparent text-slate-500 text-sm italic text-center w-full'
                    }`}>
                        <p className="text-sm">{msg.text}</p>
@@ -247,11 +259,11 @@ export function PageChat({ pdfDoc, numPages, currentPage, isOpen, onClose }: Pag
             ))}
             {['processing_model', 'processing_speech'].includes(chatState) && (
                 <div className="flex items-end gap-2 justify-start">
-                    <div className="w-6 h-6 rounded-full bg-indigo-500 text-white flex items-center justify-center text-xs font-bold flex-shrink-0">AI</div>
+                    <div className="w-6 h-6 rounded-full bg-blue-600 text-white flex items-center justify-center text-xs font-bold flex-shrink-0">AI</div>
                     <div className="px-3 py-2 rounded-xl bg-slate-100 text-slate-800">
-                        <span className="inline-block w-2 h-2 bg-indigo-400 rounded-full animate-bounce delay-0"></span>
-                        <span className="inline-block w-2 h-2 bg-indigo-400 rounded-full animate-bounce delay-100 mx-1"></span>
-                        <span className="inline-block w-2 h-2 bg-indigo-400 rounded-full animate-bounce delay-200"></span>
+                        <span className="inline-block w-2 h-2 bg-blue-400 rounded-full animate-bounce delay-0"></span>
+                        <span className="inline-block w-2 h-2 bg-blue-400 rounded-full animate-bounce delay-100 mx-1"></span>
+                        <span className="inline-block w-2 h-2 bg-blue-400 rounded-full animate-bounce delay-200"></span>
                     </div>
                 </div>
             )}
