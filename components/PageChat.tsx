@@ -148,6 +148,8 @@ export function PageChat({ pdfDoc, numPages, currentPage, isOpen, onClose }: Pag
     
     try {
         let fullText = '';
+        let hasTextContent = false;
+
         for (let i = start; i <= end; i++) {
             const page = await pdfDoc.getPage(i);
             const textContent = await page.getTextContent();
@@ -158,6 +160,8 @@ export function PageChat({ pdfDoc, numPages, currentPage, isOpen, onClose }: Pag
                 fullText += `--- PAGE ${i} ---\n[This page is empty or contains only images.]\n\n`;
                 continue;
             }
+
+            hasTextContent = true; // Found a page with text items
 
             const allItems = textContent.items.filter((item: any) => item.str?.trim());
             
@@ -221,6 +225,17 @@ export function PageChat({ pdfDoc, numPages, currentPage, isOpen, onClose }: Pag
             fullText += `--- PAGE ${i} ---\n${cleanedPageText}\n\n`;
         }
       
+      if (!hasTextContent) {
+        const pageRange = start === end ? `page ${start}` : `pages ${start}-${end}`;
+        setChatHistory([{ 
+            role: 'model',
+            text: `It looks like ${pageRange} contain only images or diagrams. I can only read text, so I can't explain the content here. Please select a different page or range with text to chat about it!` 
+        }]);
+        setChatState('context_loaded');
+        chatSessionRef.current = null;
+        return;
+      }
+
       chatSessionRef.current = startPageChatSession(fullText);
       setChatState('context_loaded');
       setChatHistory([{ role: 'system', text: `AI context loaded for pages ${start}-${end}. Ask me anything about this section!` }]);
@@ -389,7 +404,7 @@ export function PageChat({ pdfDoc, numPages, currentPage, isOpen, onClose }: Pag
   if (!isOpen) return null;
 
   const renderMicButton = () => {
-    const isMicDisabled = chatState !== 'context_loaded';
+    const isMicDisabled = chatState !== 'context_loaded' || !chatSessionRef.current;
     
     if (chatState === 'listening') {
         return (
@@ -484,10 +499,10 @@ export function PageChat({ pdfDoc, numPages, currentPage, isOpen, onClose }: Pag
                     placeholder="Type a question..."
                     className="flex-1 p-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-shadow shadow-sm resize-none"
                     rows={1}
-                    disabled={chatState !== 'context_loaded'}
+                    disabled={chatState !== 'context_loaded' || !chatSessionRef.current}
                 />
                 {renderMicButton()}
-                <button type="submit" disabled={!textInput.trim() || chatState !== 'context_loaded'} className="px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 disabled:bg-slate-400">
+                <button type="submit" disabled={!textInput.trim() || chatState !== 'context_loaded' || !chatSessionRef.current} className="px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 disabled:bg-slate-400">
                     Send
                 </button>
              </form>
