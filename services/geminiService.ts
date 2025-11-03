@@ -82,23 +82,25 @@ export async function getReview(documentText: string, userSummary: string): Prom
         d. An actionable suggestion to help the user improve. This could be a recommendation to review a specific section, a related concept to study, or a question to consider that would lead them to the correct understanding.
         e. A list of 2-3 'relatedConcepts'. These should be keywords or topics related to the missed point that the user can research for deeper understanding.
   `;
-
-  const response = await ai.models.generateContent({
-    model: "gemini-2.5-pro",
-    contents: prompt,
-    config: {
-      responseMimeType: "application/json",
-      responseSchema: reviewSchema,
-    },
-  });
-
   try {
+    const response = await ai.models.generateContent({
+        model: "gemini-2.5-flash",
+        contents: prompt,
+        config: {
+        responseMimeType: "application/json",
+        responseSchema: reviewSchema,
+        },
+    });
+
     const jsonString = response.text;
     const result = JSON.parse(jsonString);
     return result as ReviewResult;
   } catch (e) {
-    console.error("Failed to parse Gemini response:", e);
-    throw new Error("The AI returned an invalid response. Please try again.");
+    console.error("Failed to get review from Gemini:", e);
+    if (e instanceof Error && e.message.includes('fetch')) {
+        throw new Error("A network error occurred. Please check your connection and try again.");
+    }
+    throw new Error("The AI returned an invalid response or an error occurred. Please try again.");
   }
 }
 
@@ -135,44 +137,66 @@ export async function generateSpeech(text: string): Promise<string | null> {
         return base64Audio || null;
     } catch (e) {
         console.error("Failed to generate speech:", e);
+        // Do not throw here, as it's not a critical failure. The app can proceed without audio.
         return null;
     }
 }
 
-export async function createLiveSession({ onTranscriptionUpdate, onTurnComplete, onError }: {
+const workletCode = `
+class AudioProcessor extends AudioWorkletProcessor {
+  process(inputs) {
+    const channelData = inputs[0][0];
+    if (channelData) {
+      // Convert Float32Array to Int16Array and post back.
+      const int16 = new Int16Array(channelData.length);
+      for (let i = 0; i < channelData.length; i++) {
+        // Clamp the values to the Int16 range.
+        int16[i] = Math.max(-32768, Math.min(32767, channelData[i] * 32768));
+      }
+      this.port.postMessage(int16);
+    }
+    return true; // Keep processor alive.
+  }
+}
+registerProcessor('audio-processor', AudioProcessor);
+`;
+
+let workletURL: string | undefined;
+
+export async function createLiveSession({ onTranscriptionUpdate, onTurnComplete, onError, onClose }: {
     onTranscriptionUpdate: (text: string) => void;
     onTurnComplete: () => void;
     onError: (error: any) => void;
+    onClose: () => void;
 }) {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
     const context = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
     const source = context.createMediaStreamSource(stream);
-    
-    // Using ScriptProcessor as it is supported in this environment for real-time audio processing.
-    const scriptProcessor = context.createScriptProcessor(4096, 1, 1);
 
+    if (!workletURL) {
+      const blob = new Blob([workletCode], { type: 'application/javascript' });
+      workletURL = URL.createObjectURL(blob);
+    }
+    
+    await context.audioWorklet.addModule(workletURL);
+    const workletNode = new AudioWorkletNode(context, 'audio-processor');
+    
     const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-09-2025',
         callbacks: {
             onopen: () => {
-                scriptProcessor.onaudioprocess = (audioProcessingEvent) => {
-                    const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
-                    const l = inputData.length;
-                    const int16 = new Int16Array(l);
-                    for (let i = 0; i < l; i++) {
-                        int16[i] = inputData[i] * 32768;
-                    }
+                workletNode.port.onmessage = (event: MessageEvent<Int16Array>) => {
                     const pcmBlob = {
-                        data: encode(new Uint8Array(int16.buffer)),
+                        data: encode(new Uint8Array(event.data.buffer)),
                         mimeType: 'audio/pcm;rate=16000',
                     };
                     
                     sessionPromise.then((session) => {
                         session.sendRealtimeInput({ media: pcmBlob });
-                    });
+                    }).catch(onError);
                 };
-                source.connect(scriptProcessor);
-                scriptProcessor.connect(context.destination); // Connect to destination to start processing
+                source.connect(workletNode);
+                workletNode.connect(context.destination);
             },
             onmessage: (message: LiveServerMessage) => {
                 if (message.serverContent?.inputTranscription?.text) {
@@ -188,16 +212,16 @@ export async function createLiveSession({ onTranscriptionUpdate, onTurnComplete,
             },
             onclose: (e: CloseEvent) => {
                 console.debug('Live session closed');
+                onClose();
             },
         },
         config: {
             inputAudioTranscription: {},
+            responseModalities: [Modality.AUDIO],
         },
     });
 
     const session = await sessionPromise;
     
-    // The calling components expect a `workletNode`. We are passing the scriptProcessor 
-    // to satisfy the expected signature from the calling components.
-    return { session, stream, context, workletNode: scriptProcessor, source };
+    return { session, stream, context, workletNode, source };
 }

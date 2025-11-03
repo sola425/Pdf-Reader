@@ -2,8 +2,9 @@ import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { Chat } from '@google/genai';
 import { startPageChatSession, generateSpeech, createLiveSession } from '../services/geminiService';
 import { decode, decodeAudioData } from '../utils/audio';
+import { getAudioContext } from '../utils/audioContext';
 import { Loader } from './Loader';
-import { MicrophoneIcon, StopIcon, XCircleIcon } from './Icons';
+import { MicrophoneIcon, StopIcon, XCircleIcon, ChevronDownIcon } from './Icons';
 
 interface PageChatProps {
   pdfDoc: any;
@@ -18,7 +19,7 @@ type ChatMessage = {
   text: string;
 };
 
-type ChatState = 'idle' | 'loading_context' | 'context_loaded' | 'listening' | 'processing_speech' | 'processing_model' | 'speaking';
+type ChatState = 'idle' | 'loading_context' | 'context_loaded' | 'listening' | 'stopping' | 'processing_speech' | 'processing_model' | 'speaking';
 
 export function PageChat({ pdfDoc, numPages, currentPage, isOpen, onClose }: PageChatProps) {
   const [startPage, setStartPage] = useState(currentPage);
@@ -26,35 +27,112 @@ export function PageChat({ pdfDoc, numPages, currentPage, isOpen, onClose }: Pag
   const [chatHistory, setChatHistory] = useState<ChatMessage[]>([]);
   const [chatState, setChatState] = useState<ChatState>('idle');
   const [error, setError] = useState('');
+  const [isContextSettingsOpen, setIsContextSettingsOpen] = useState(false);
+  const [textInput, setTextInput] = useState('');
   
   const chatSessionRef = useRef<Chat | null>(null);
-  const liveSessionCleanupRef = useRef<(() => void) | null>(null);
-  const outputAudioContextRef = useRef<AudioContext | null>(null);
+  const liveSessionRef = useRef<any>(null);
+  const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
   const chatContentRef = useRef<HTMLDivElement>(null);
-  // Fix: Add refs for both final and interim transcripts
   const finalTranscriptRef = useRef<string>('');
   const interimTranscriptRef = useRef<string>('');
+  const modalRef = useRef<HTMLDivElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   useEffect(() => {
-    setStartPage(currentPage);
-    setEndPage(currentPage);
-  }, [currentPage]);
+    // Update page range selectors when the main viewer page changes, but only if chat is idle.
+    if (chatState === 'idle' || chatState === 'context_loaded') {
+        setStartPage(currentPage);
+        setEndPage(currentPage);
+    }
+  }, [currentPage, chatState]);
 
   useEffect(() => {
       if (chatContentRef.current) {
         chatContentRef.current.scrollTop = chatContentRef.current.scrollHeight;
       }
   }, [chatHistory]);
+  
+  // Focus trapping for accessibility
+  useEffect(() => {
+    if (!isOpen) return;
+    const modal = modalRef.current;
+    if (!modal) return;
 
-  const resetChat = () => {
+    const focusableElements = Array.from(modal.querySelectorAll(
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+    )) as HTMLElement[];
+
+    if (focusableElements.length === 0) return;
+    
+    const firstElement = focusableElements[0];
+    const lastElement = focusableElements[focusableElements.length - 1];
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+        if (e.key !== 'Tab') return;
+        if (e.shiftKey) { // Shift+Tab
+            if (document.activeElement === firstElement) {
+                lastElement.focus();
+                e.preventDefault();
+            }
+        } else { // Tab
+            if (document.activeElement === lastElement) {
+                firstElement.focus();
+                e.preventDefault();
+            }
+        }
+    };
+    
+    document.addEventListener('keydown', handleKeyDown);
+    firstElement?.focus();
+
+    return () => {
+        document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isOpen]);
+
+  // Auto-growing textarea
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (textarea) {
+      textarea.style.height = 'auto'; // Reset height to recalculate
+      const scrollHeight = textarea.scrollHeight;
+      const maxHeight = 120; // Approx 5 * 24px line-height
+      if (scrollHeight > maxHeight) {
+        textarea.style.height = `${maxHeight}px`;
+        textarea.style.overflowY = 'auto';
+      } else {
+        textarea.style.height = `${scrollHeight}px`;
+        textarea.style.overflowY = 'hidden';
+      }
+    }
+  }, [textInput]);
+
+  const cleanupLiveSession = useCallback(() => {
+    if (liveSessionRef.current) {
+        liveSessionRef.current.session?.close();
+        liveSessionRef.current.stream?.getTracks().forEach((track: MediaStreamTrack) => track.stop());
+        if (liveSessionRef.current.workletNode) {
+            liveSessionRef.current.workletNode.port.onmessage = null;
+            liveSessionRef.current.workletNode.disconnect();
+        }
+        liveSessionRef.current.source?.disconnect();
+        if (liveSessionRef.current.context?.state !== 'closed') {
+            liveSessionRef.current.context?.close();
+        }
+        liveSessionRef.current = null;
+    }
+  }, []);
+
+  const resetChat = useCallback(() => {
     setChatHistory([]);
     chatSessionRef.current = null;
     setError('');
     setChatState('idle');
-    if (liveSessionCleanupRef.current) liveSessionCleanupRef.current();
-  };
+    cleanupLiveSession();
+  }, [cleanupLiveSession]);
 
-  const handleLoadContext = async () => {
+  const handleLoadContext = useCallback(async () => {
     resetChat();
     setChatState('loading_context');
     setError('');
@@ -79,29 +157,44 @@ export function PageChat({ pdfDoc, numPages, currentPage, isOpen, onClose }: Pag
       
       chatSessionRef.current = startPageChatSession(fullText);
       setChatState('context_loaded');
-      setChatHistory([{ role: 'system', text: `AI context loaded for pages ${start}-${end}. Ask me anything about these pages!` }]);
+      setChatHistory([{ role: 'system', text: `AI context loaded for pages ${start}-${end}. Ask me anything about this section!` }]);
     } catch (e) {
       console.error("Failed to load context:", e);
       setError('Could not extract text from the specified pages.');
       setChatState('idle');
     }
-  };
+  }, [pdfDoc, startPage, endPage, numPages, resetChat]);
+
+  // Auto-load context when the component becomes visible
+  useEffect(() => {
+    if (isOpen && chatState === 'idle') {
+        handleLoadContext();
+    }
+  }, [isOpen, chatState, handleLoadContext]);
+
 
   const playAudio = async (base64Audio: string) => {
-    if (!outputAudioContextRef.current || outputAudioContextRef.current.state === 'closed') {
-        outputAudioContextRef.current = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 24000 });
-    }
-    const context = outputAudioContextRef.current;
+    const context = getAudioContext();
     
     try {
         const decoded = decode(base64Audio);
         const audioBuffer = await decodeAudioData(decoded, context, 24000, 1);
+
+        if (audioSourceRef.current) {
+            audioSourceRef.current.onended = null;
+            audioSourceRef.current.stop();
+        }
+
         const source = context.createBufferSource();
+        audioSourceRef.current = source;
         source.buffer = audioBuffer;
         source.connect(context.destination);
         source.start();
         source.onended = () => {
-            setChatState('context_loaded');
+            if (audioSourceRef.current === source) {
+                setChatState('context_loaded');
+                audioSourceRef.current = null;
+            }
         };
     } catch (e) {
         console.error("Failed to play audio:", e);
@@ -110,14 +203,15 @@ export function PageChat({ pdfDoc, numPages, currentPage, isOpen, onClose }: Pag
     }
   };
 
-  const processUserSpeech = useCallback(async (text: string) => {
-    if (text.trim().length < 2) {
+  const handleSendMessage = useCallback(async (text: string) => {
+    if (text.trim().length < 1) {
       setChatState('context_loaded');
       return;
     }
     
     setChatHistory(prev => [...prev, { role: 'user', text }]);
     setChatState('processing_model');
+    setTextInput('');
 
     try {
       if (!chatSessionRef.current) throw new Error("Chat session not initialized.");
@@ -132,44 +226,65 @@ export function PageChat({ pdfDoc, numPages, currentPage, isOpen, onClose }: Pag
       if (audioData) {
         await playAudio(audioData);
       } else {
-        setError("Could not generate speech for the AI's response.");
+        // Fallback if speech generation fails
         setChatState('context_loaded');
       }
 
     } catch (e) {
       console.error("Chat processing error:", e);
-      setError("An error occurred while talking to the AI.");
+      const message = e instanceof Error ? e.message : 'An unknown error occurred.';
+      setError(`An error occurred while talking to the AI: ${message}`);
       setChatState('context_loaded');
     }
   }, []);
+  
+  const processTranscriptAndSend = useCallback(() => {
+    const fullTranscript = (finalTranscriptRef.current + interimTranscriptRef.current).trim();
+    finalTranscriptRef.current = '';
+    interimTranscriptRef.current = '';
+    
+    if (fullTranscript) {
+        setChatState('processing_speech');
+        handleSendMessage(fullTranscript);
+    } else {
+        setChatState('context_loaded');
+    }
+  }, [handleSendMessage]);
 
-  // Fix: Reworked transcription handling logic to be robust.
+  const processTranscriptRef = useRef(processTranscriptAndSend);
+  useEffect(() => {
+    processTranscriptRef.current = processTranscriptAndSend;
+  }, [processTranscriptAndSend]);
+
   const stopListeningAndProcess = useCallback(() => {
-    if (chatState !== 'listening') {
+    if (chatState !== 'listening' || !liveSessionRef.current) {
       return;
     }
-    setChatState('processing_speech');
-    if (liveSessionCleanupRef.current) {
-        liveSessionCleanupRef.current();
-        liveSessionCleanupRef.current = null;
-    }
-    
-    const fullTranscript = (finalTranscriptRef.current + interimTranscriptRef.current).trim();
-
-    // A small delay to ensure the final transcript is captured.
-    setTimeout(() => {
-        processUserSpeech(fullTranscript);
-    }, 100);
-  }, [chatState, processUserSpeech]);
+    setChatState('stopping');
+    // Closing the session will trigger the onClose callback, which handles processing.
+    liveSessionRef.current.session.close();
+  }, [chatState]);
   
-  // Fix: Reworked transcription handling logic to be robust.
   const startListening = async () => {
+    if (chatState !== 'context_loaded') return;
+    setError('');
+
+    try {
+      const permissionStatus = await navigator.permissions.query({ name: 'microphone' as PermissionName });
+      if (permissionStatus.state === 'denied') {
+        setError('Microphone access is denied. Please enable it in your browser settings to chat.');
+        return;
+      }
+    } catch (err) {
+      console.warn("Permissions API not supported, proceeding with recording attempt.", err);
+    }
+
     setChatState('listening');
     finalTranscriptRef.current = '';
     interimTranscriptRef.current = '';
 
     try {
-        const { session, stream, context, workletNode, source } = await createLiveSession({
+        const sessionData = await createLiveSession({
             onTranscriptionUpdate: (textChunk) => {
                 interimTranscriptRef.current = textChunk;
             },
@@ -179,70 +294,89 @@ export function PageChat({ pdfDoc, numPages, currentPage, isOpen, onClose }: Pag
             },
             onError: (err) => {
               console.error('Live session error:', err);
-              setError('A recording error occurred.');
+              setError('A recording error occurred. Please try again.');
               setChatState('context_loaded');
-              if (liveSessionCleanupRef.current) {
-                liveSessionCleanupRef.current();
-                liveSessionCleanupRef.current = null;
-              }
+              cleanupLiveSession();
+            },
+            onClose: () => {
+                cleanupLiveSession();
+                processTranscriptRef.current();
             }
         });
-
-        liveSessionCleanupRef.current = () => {
-            session.close();
-            stream.getTracks().forEach(track => track.stop());
-            if (workletNode && workletNode.disconnect) workletNode.disconnect();
-            if (source && source.disconnect) source.disconnect();
-            if (context.state !== 'closed') context.close();
-        };
-
+        liveSessionRef.current = sessionData;
     } catch (e) {
         console.error("Failed to start listening:", e);
-        setError("Could not access microphone.");
+        if (e instanceof Error && e.name === 'NotAllowedError') {
+            setError("Microphone access was denied. Please allow access and try again.");
+        } else {
+            setError("Could not access microphone. Please ensure it is connected and allowed.");
+        }
         setChatState('context_loaded');
     }
+  };
+
+  const handleTextSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    handleSendMessage(textInput);
   };
   
   if (!isOpen) return null;
 
   const renderMicButton = () => {
-    const isMicDisabled = chatState === 'idle' || chatState === 'loading_context' || chatState === 'processing_model' || chatState === 'speaking' || chatState === 'processing_speech';
+    const isMicDisabled = chatState !== 'context_loaded';
     
     if (chatState === 'listening') {
         return (
-            <button onClick={stopListeningAndProcess} className="w-16 h-16 bg-red-600 text-white rounded-full flex items-center justify-center shadow-lg animate-pulse">
-                <StopIcon className="w-8 h-8" />
+            <button onClick={stopListeningAndProcess} className="p-2 bg-red-600 text-white rounded-full flex items-center justify-center shadow-lg animate-pulse" aria-label="Stop listening">
+                <StopIcon className="w-5 h-5" />
             </button>
         );
     }
 
     return (
-        <button onClick={startListening} disabled={isMicDisabled} className="w-16 h-16 bg-blue-600 text-white rounded-full flex items-center justify-center shadow-lg disabled:bg-slate-400 disabled:cursor-not-allowed">
-            <MicrophoneIcon className="w-8 h-8" />
+        <button onClick={startListening} disabled={isMicDisabled} className="p-2 bg-blue-600 text-white rounded-full flex items-center justify-center shadow-lg disabled:bg-slate-400 disabled:cursor-not-allowed" aria-label="Start listening">
+            <MicrophoneIcon className="w-5 h-5" />
         </button>
     );
   };
 
   return (
-    <div className="absolute bottom-4 right-4 w-full max-w-md h-[70vh] max-h-[600px] bg-white rounded-2xl shadow-2xl border border-slate-200/80 flex flex-col z-50 animate-fade-in">
+    <div 
+        ref={modalRef}
+        className="fixed inset-0 z-50 md:bottom-4 md:right-4 md:inset-auto md:w-full md:max-w-md md:h-[70vh] md:max-h-[600px] bg-white rounded-none md:rounded-2xl shadow-2xl border-slate-200/80 flex flex-col animate-fade-in"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="chat-heading"
+    >
         <header className="p-4 border-b border-gray-200 flex items-center justify-between flex-shrink-0">
-            <h2 className="text-lg font-bold text-slate-800">Chat with Page Content</h2>
-            <button onClick={onClose} className="p-1 rounded-full hover:bg-slate-200">
+            <h2 id="chat-heading" className="text-lg font-bold text-slate-800">Chat with Page Content</h2>
+            <button onClick={onClose} className="p-1 rounded-full hover:bg-slate-200" aria-label="Close chat">
                 <XCircleIcon className="w-6 h-6 text-slate-500" />
             </button>
         </header>
 
-        <div className="p-4 flex-shrink-0 border-b border-gray-200 bg-slate-50">
-            <div className="flex items-center gap-2">
-                <span className="text-sm font-medium text-slate-700">Pages:</span>
-                <input type="number" value={startPage} onChange={e => setStartPage(parseInt(e.target.value, 10))} min={1} max={numPages} className="w-16 p-1 border border-slate-300 rounded-md text-sm focus:ring-1 focus:ring-blue-500" />
-                <span className="text-sm font-medium text-slate-700">-</span>
-                <input type="number" value={endPage} onChange={e => setEndPage(parseInt(e.target.value, 10))} min={1} max={numPages} className="w-16 p-1 border border-slate-300 rounded-md text-sm focus:ring-1 focus:ring-blue-500" />
-                <button onClick={handleLoadContext} disabled={chatState === 'loading_context'} className="px-3 py-1 bg-blue-100 text-blue-700 text-sm font-semibold rounded-md hover:bg-blue-200 disabled:opacity-50">
-                    {chatState === 'loading_context' ? 'Loading...' : 'Load Context'}
-                </button>
-            </div>
-            {error && <p className="text-xs text-red-600 mt-2">{error}</p>}
+        <div className="flex-shrink-0 border-b border-gray-200 bg-slate-50">
+            <button 
+                onClick={() => setIsContextSettingsOpen(prev => !prev)}
+                className="w-full text-left p-2 text-xs text-slate-500 hover:bg-slate-100 flex justify-between items-center"
+            >
+                <span>Context: Pages {Math.min(startPage, endPage)}-{Math.max(startPage, endPage)}</span>
+                <ChevronDownIcon className={`w-4 h-4 transition-transform ${isContextSettingsOpen ? 'rotate-180' : ''}`} />
+            </button>
+            {isContextSettingsOpen && (
+                <div className="p-4">
+                    <div className="flex items-center gap-2">
+                        <span className="text-sm font-medium text-slate-700">Pages:</span>
+                        <input type="number" value={startPage} onChange={e => setStartPage(parseInt(e.target.value, 10))} min={1} max={numPages} className="w-16 p-1 border border-slate-300 rounded-md text-sm focus:ring-1 focus:ring-blue-500" />
+                        <span className="text-sm font-medium text-slate-700">-</span>
+                        <input type="number" value={endPage} onChange={e => setEndPage(parseInt(e.target.value, 10))} min={1} max={numPages} className="w-16 p-1 border border-slate-300 rounded-md text-sm focus:ring-1 focus:ring-blue-500" />
+                        <button onClick={handleLoadContext} disabled={chatState === 'loading_context'} className="px-3 py-1 bg-blue-100 text-blue-700 text-sm font-semibold rounded-md hover:bg-blue-200 disabled:opacity-50">
+                            {chatState === 'loading_context' ? 'Loading...' : 'Reload'}
+                        </button>
+                    </div>
+                </div>
+            )}
+             {error && <p className="text-xs text-red-600 p-2">{error}</p>}
         </div>
 
         <div ref={chatContentRef} className="flex-1 p-4 overflow-y-auto space-y-4">
@@ -253,11 +387,11 @@ export function PageChat({ pdfDoc, numPages, currentPage, isOpen, onClose }: Pag
                        msg.role === 'user' ? 'bg-blue-600 text-white' : 
                        msg.role === 'model' ? 'bg-slate-100 text-slate-800' : 'bg-transparent text-slate-500 text-sm italic text-center w-full'
                    }`}>
-                       <p className="text-sm">{msg.text}</p>
+                       <p className="text-sm break-words">{msg.text}</p>
                    </div>
                 </div>
             ))}
-            {['processing_model', 'processing_speech'].includes(chatState) && (
+            {['processing_model', 'processing_speech', 'stopping'].includes(chatState) && (
                 <div className="flex items-end gap-2 justify-start">
                     <div className="w-6 h-6 rounded-full bg-blue-600 text-white flex items-center justify-center text-xs font-bold flex-shrink-0">AI</div>
                     <div className="px-3 py-2 rounded-xl bg-slate-100 text-slate-800">
@@ -269,11 +403,32 @@ export function PageChat({ pdfDoc, numPages, currentPage, isOpen, onClose }: Pag
             )}
         </div>
         
-        <footer className="p-4 border-t border-gray-200 flex flex-col items-center justify-center flex-shrink-0">
-             {renderMicButton()}
-             <p className="text-xs text-slate-500 mt-2 h-4">
+        <footer className="p-4 border-t border-gray-200 flex-shrink-0">
+             <form onSubmit={handleTextSubmit} className="flex items-center gap-2 w-full">
+                <textarea
+                    ref={textareaRef}
+                    value={textInput}
+                    onChange={(e) => setTextInput(e.target.value)}
+                    onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                            handleTextSubmit(e);
+                        }
+                    }}
+                    placeholder="Type a question..."
+                    className="flex-1 p-2 border border-slate-300 rounded-lg text-sm focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-shadow shadow-sm resize-none"
+                    rows={1}
+                    disabled={chatState !== 'context_loaded'}
+                />
+                {renderMicButton()}
+                <button type="submit" disabled={!textInput.trim() || chatState !== 'context_loaded'} className="px-4 py-2 bg-blue-600 text-white text-sm font-semibold rounded-lg hover:bg-blue-700 disabled:bg-slate-400">
+                    Send
+                </button>
+             </form>
+             <p className="text-xs text-slate-500 mt-2 h-4 text-center">
                  {chatState === 'listening' && 'Listening...'}
                  {chatState === 'speaking' && 'AI is speaking...'}
+                 {chatState === 'stopping' && 'Finishing up...'}
                  {chatState === 'processing_speech' && 'Processing your speech...'}
                  {chatState === 'processing_model' && 'Thinking...'}
              </p>

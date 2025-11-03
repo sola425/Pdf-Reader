@@ -1,14 +1,17 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { DocumentInput } from './components/DocumentInput';
-import { VoiceReviewer } from './components/VoiceReviewer';
 import { PdfViewer } from './components/PdfViewer';
-import { LogoIcon, XCircleIcon, ChevronDoubleLeftIcon, ChevronDoubleRightIcon, ArrowPathIcon } from './components/Icons';
+import { LogoIcon, XCircleIcon } from './components/Icons';
 import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs";
 import { Loader } from './components/Loader';
+import type { ReviewResult } from './types';
 
 // Set up the PDF.js worker.
 const PDF_WORKER_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs";
 pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_WORKER_URL;
+
+const SESSION_KEY = 'recallReaderSession';
+const MAX_SESSION_FILE_SIZE = 2 * 1024 * 1024; // 2MB
 
 export default function App() {
   if (!process.env.API_KEY) {
@@ -31,13 +34,103 @@ export default function App() {
   const [documentText, setDocumentText] = useState<string>('');
   const [pdfFile, setPdfFile] = useState<File | null>(null);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const [processingProgress, setProcessingProgress] = useState<{ current: number, total: number } | null>(null);
   const [error, setError] = useState<string>('');
   const [view, setView] = useState<'input' | 'review'>('input');
   const [highlightText, setHighlightText] = useState<string | null>(null);
   const [targetPage, setTargetPage] = useState<number | null>(null);
-  const [isReviewerOpen, setIsReviewerOpen] = useState(true);
+  const [reviewResult, setReviewResult] = useState<ReviewResult | null>(null);
+  
+  // Session resume state
+  const [sessionChecked, setSessionChecked] = useState<boolean>(false);
+  const [savedSessionData, setSavedSessionData] = useState<any | null>(null);
 
   const highlightTimeoutRef = useRef<number | null>(null);
+  const appStateRef = useRef<any>();
+
+  appStateRef.current = { pdfFile, documentText, reviewResult, view };
+
+  const saveSession = useCallback(async () => {
+    const currentState = appStateRef.current;
+    if (!currentState.pdfFile || currentState.view !== 'review') {
+      localStorage.removeItem(SESSION_KEY);
+      return;
+    }
+
+    if (currentState.pdfFile.size > MAX_SESSION_FILE_SIZE) {
+        console.warn(`PDF is too large (${currentState.pdfFile.size} bytes) to save session. Skipping.`);
+        localStorage.removeItem(SESSION_KEY); // Clear any old session
+        return;
+    }
+
+    const reader = new FileReader();
+    reader.readAsDataURL(currentState.pdfFile);
+    reader.onload = () => {
+        const sessionData = {
+            fileData: {
+                dataUrl: reader.result as string,
+                name: currentState.pdfFile.name,
+                type: currentState.pdfFile.type,
+            },
+            documentText: currentState.documentText,
+            reviewResult: currentState.reviewResult,
+        };
+        try {
+            localStorage.setItem(SESSION_KEY, JSON.stringify(sessionData));
+        } catch (e) {
+            console.error("Could not save session (storage may be full):", e);
+        }
+    };
+    reader.onerror = (error) => {
+        console.error("Could not convert file to save session:", error);
+    };
+  }, []);
+
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(SESSION_KEY);
+      if (saved) {
+        setSavedSessionData(JSON.parse(saved));
+      }
+    } catch (e) {
+      console.error("Failed to read saved session", e);
+      localStorage.removeItem(SESSION_KEY);
+    }
+    setSessionChecked(true);
+  }, []);
+
+  const dataURLtoFile = (dataurl: string, filename: string, type: string): File => {
+    const arr = dataurl.split(',');
+    const mimeMatch = arr[0].match(/:(.*?);/);
+    const mime = (mimeMatch && mimeMatch[1]) || type;
+    const bstr = atob(arr[arr.length - 1]);
+    let n = bstr.length;
+    const u8arr = new Uint8Array(n);
+    while (n--) {
+      u8arr[n] = bstr.charCodeAt(n);
+    }
+    return new File([u8arr], filename, { type: mime });
+  };
+
+  const resumeSession = () => {
+    if (!savedSessionData) return;
+    
+    try {
+        const file = dataURLtoFile(savedSessionData.fileData.dataUrl, savedSessionData.fileData.name, savedSessionData.fileData.type);
+
+        setPdfFile(file);
+        setDocumentText(savedSessionData.documentText);
+        setReviewResult(savedSessionData.reviewResult);
+        setView('review');
+        setSavedSessionData(null); // Clear prompt after resuming
+    } catch (e) {
+        console.error("Failed to resume session:", e);
+        setError("Could not resume the previous session. It may be corrupted.");
+        localStorage.removeItem(SESSION_KEY);
+        setSavedSessionData(null);
+    }
+  };
+
 
   const triggerTempHighlight = (text: string | null) => {
     if (highlightTimeoutRef.current) {
@@ -62,13 +155,18 @@ export default function App() {
 
   const handleDocumentSubmit = async (data: string | File) => {
     setIsProcessing(true);
+    setProcessingProgress(null);
     setError('');
     setDocumentText('');
     setPdfFile(null);
+    setReviewResult(null);
     triggerTempHighlight(null);
+    localStorage.removeItem(SESSION_KEY);
+    setSavedSessionData(null);
 
     try {
       if (typeof data === 'string') {
+        // This app flow is now focused on PDFs, so this path is less likely.
         setDocumentText(data);
       } else {
         // It's a file
@@ -78,13 +176,27 @@ export default function App() {
         const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
         const pdf = await loadingTask.promise;
         
-        let fullText = '';
-        for (let i = 1; i <= pdf.numPages; i++) {
-          const page = await pdf.getPage(i);
-          const textContent = await page.getTextContent();
-          const pageText = textContent.items.map(item => ('str' in item ? item.str : '')).join(' ');
-          fullText += `--- PAGE ${i} ---\n${pageText}\n\n`;
-        }
+        const totalPages = pdf.numPages;
+        setProcessingProgress({ current: 0, total: totalPages });
+
+        const pageNumbers = Array.from({ length: totalPages }, (_, i) => i + 1);
+        let pagesProcessed = 0;
+
+        const pageTextPromises = pageNumbers.map(pageNum =>
+            pdf.getPage(pageNum).then(page =>
+                page.getTextContent().then(textContent => {
+                    pagesProcessed++;
+                    setProcessingProgress({ current: pagesProcessed, total: totalPages });
+                    const pageText = textContent.items.map(item => ('str' in item ? item.str : '')).join(' ');
+                    return { pageNum, text: `--- PAGE ${pageNum} ---\n${pageText}\n\n` };
+                })
+            )
+        );
+
+        const extractedTexts = await Promise.all(pageTextPromises);
+        extractedTexts.sort((a, b) => a.pageNum - b.pageNum); // Ensure correct order
+        const fullText = extractedTexts.map(p => p.text).join('');
+        
         setDocumentText(fullText);
       }
       setView('review');
@@ -94,8 +206,15 @@ export default function App() {
       setView('input'); // Go back to input screen on error
     } finally {
       setIsProcessing(false);
+      setProcessingProgress(null);
     }
   };
+  
+  useEffect(() => {
+    if (view === 'review' && (pdfFile || documentText)) {
+      saveSession();
+    }
+  }, [view, pdfFile, documentText, reviewResult, saveSession]);
 
   const handleReset = () => {
     setDocumentText('');
@@ -103,33 +222,29 @@ export default function App() {
     setError('');
     setView('input');
     triggerTempHighlight(null);
-    setIsReviewerOpen(true);
+    setReviewResult(null);
+    setSavedSessionData(null);
+    localStorage.removeItem(SESSION_KEY);
   };
 
-  const renderReviewView = () => {
-     if (!documentText && !pdfFile) return null;
+  const handleReviewComplete = (result: ReviewResult) => {
+    setReviewResult(result);
+  };
 
-     if (pdfFile) {
-        return (
-            <div className="rounded-xl shadow-lg border border-slate-200/80 h-full overflow-hidden">
-                <PdfViewer 
-                    file={pdfFile} 
-                    highlightText={highlightText} 
-                    targetPage={targetPage}
-                    onPageNavigated={() => setTargetPage(null)}
-                />
-            </div>
-        );
-     }
-     
-     return (
-        <div className="bg-white p-6 rounded-xl shadow-lg border border-slate-200/80 h-full flex flex-col">
-            <h2 className="text-xl font-bold mb-4 text-slate-800 border-b pb-2 flex-shrink-0">Document Content</h2>
-            <div className="prose prose-slate max-w-none flex-1 overflow-y-auto pr-2">
-                <p className="whitespace-pre-wrap">{documentText}</p>
-            </div>
-        </div>
-     );
+  if (view === 'review' && pdfFile) {
+    return (
+        <PdfViewer 
+            file={pdfFile} 
+            highlightText={highlightText} 
+            targetPage={targetPage}
+            onPageNavigated={() => setTargetPage(null)}
+            documentText={documentText}
+            initialReviewResult={reviewResult}
+            onReviewComplete={handleReviewComplete}
+            setHighlightAndNavigate={handleHighlightAndNavigate}
+            onReset={handleReset}
+        />
+    );
   }
 
   return (
@@ -138,58 +253,36 @@ export default function App() {
         <div className="w-full max-w-7xl mx-auto flex items-center justify-between py-3 px-4 sm:px-6 lg:px-8">
             <div className="flex items-center gap-3">
             <LogoIcon className="h-10 w-10" />
-            <h1 className="text-2xl sm:text-3xl font-extrabold text-slate-900 tracking-tight brand-gradient">
+            <h1 className="text-2xl sm:text-3xl font-extrabold text-blue-600 tracking-tight">
                 RecallReader
             </h1>
             </div>
-            {view === 'review' && (
-            <div className="flex items-center gap-2 sm:gap-4">
-                <button
-                onClick={handleReset}
-                className="flex items-center gap-2 px-4 py-2 text-sm font-semibold text-slate-700 bg-slate-100 rounded-lg hover:bg-slate-200 transition-colors"
-                >
-                <ArrowPathIcon className="h-4 w-4" />
-                <span>Start Over</span>
-                </button>
-                <button
-                onClick={() => setIsReviewerOpen(!isReviewerOpen)}
-                className="p-2 text-sm font-semibold text-slate-700 bg-slate-100 rounded-lg hover:bg-slate-200 transition-colors"
-                title={isReviewerOpen ? 'Hide Review Panel' : 'Show Review Panel'}
-                >
-                {isReviewerOpen ? <ChevronDoubleRightIcon className="h-5 w-5" /> : <ChevronDoubleLeftIcon className="h-5 w-5" />}
-                </button>
-            </div>
-            )}
         </div>
       </header>
       
       <main className="w-full max-w-7xl mx-auto flex-1 px-4 sm:px-6 lg:px-8 py-8 flex flex-col">
         <div className="flex-1 min-h-0">
-          {view === 'input' && (
+          {view === 'input' && sessionChecked && (
             <div className="flex justify-center pt-8">
-              <DocumentInput onSubmit={handleDocumentSubmit} />
+              <DocumentInput 
+                onSubmit={handleDocumentSubmit} 
+                savedSessionData={savedSessionData}
+                onResumeSession={resumeSession}
+                onClearSavedSession={() => {
+                    localStorage.removeItem(SESSION_KEY);
+                    setSavedSessionData(null);
+                }}
+              />
             </div>
           )}
           {isProcessing && (
              <div className="text-center p-8 h-full flex flex-col justify-center items-center">
                 <Loader />
                 <p className="mt-4 text-slate-600 font-semibold">Processing Document...</p>
-             </div>
-          )}
-          {view === 'review' && !isProcessing && (
-             <div className="flex h-full gap-6">
-                <div className="flex-1 min-w-0 h-full">
-                    {renderReviewView()}
-                </div>
-                {documentText && (
-                    <aside className={`transition-all duration-300 ease-in-out flex-shrink-0 ${isReviewerOpen ? 'w-[26rem]' : 'w-0'}`}>
-                        <div className={`h-full overflow-hidden transition-opacity duration-300 ${isReviewerOpen ? 'opacity-100' : 'opacity-0'}`}>
-                            <VoiceReviewer 
-                                documentText={documentText} 
-                                setHighlightAndNavigate={handleHighlightAndNavigate}
-                            />
-                        </div>
-                    </aside>
+                {processingProgress && (
+                    <p className="mt-2 text-sm text-slate-500">
+                        Page {processingProgress.current} of {processingProgress.total}
+                    </p>
                 )}
              </div>
           )}

@@ -1,11 +1,14 @@
 import React, { useState, useCallback } from 'react';
-import { UploadIcon } from './Icons';
+import { UploadIcon, XIcon } from './Icons';
 
 interface DocumentInputProps {
   onSubmit: (data: string | File) => void;
+  savedSessionData: any | null;
+  onResumeSession: () => void;
+  onClearSavedSession: () => void;
 }
 
-export function DocumentInput({ onSubmit }: DocumentInputProps) {
+export function DocumentInput({ onSubmit, savedSessionData, onResumeSession, onClearSavedSession }: DocumentInputProps) {
   const [text, setText] = useState<string>('');
   const [fileName, setFileName] = useState<string>('');
   const [error, setError] = useState<string>('');
@@ -77,6 +80,26 @@ export function DocumentInput({ onSubmit }: DocumentInputProps) {
 
   return (
     <div className="bg-white p-8 rounded-2xl shadow-lg border border-slate-200/80 w-full max-w-3xl mx-auto animate-fade-in">
+      {savedSessionData && (
+        <div className="mb-6 p-4 bg-indigo-50 border border-indigo-200 rounded-lg flex items-center justify-between animate-fade-in">
+            <div>
+                <p className="font-semibold text-indigo-800">You have a previous session saved.</p>
+                <p className="text-sm text-indigo-700">Resume reviewing '{savedSessionData.fileData.name}'.</p>
+            </div>
+            <div className="flex items-center gap-2">
+                <button 
+                  onClick={onResumeSession} 
+                  className="px-4 py-2 bg-indigo-600 text-white font-semibold rounded-md hover:bg-indigo-700 text-sm transition-colors"
+                >
+                    Resume
+                </button>
+                <button onClick={onClearSavedSession} className="p-2 text-slate-500 hover:bg-slate-200 rounded-full" aria-label="Dismiss saved session">
+                    <XIcon className="w-5 h-5" />
+                </button>
+            </div>
+        </div>
+      )}
+
       <div className="text-center mb-8">
         <h2 className="text-3xl font-extrabold tracking-tight text-slate-900">Start Your Review Session</h2>
         <p className="mt-2 text-lg text-slate-600">
@@ -135,7 +158,7 @@ export function DocumentInput({ onSubmit }: DocumentInputProps) {
           <button
             type="submit"
             disabled={isSubmitDisabled}
-            className="w-full px-6 py-4 bg-blue-600 text-white font-bold text-lg rounded-lg hover:bg-blue-700 transition-all shadow-lg focus:outline-none focus:ring-4 focus:ring-blue-300 disabled:bg-slate-400 disabled:cursor-not-allowed disabled:shadow-none"
+            className="w-full px-6 py-4 bg-gradient-to-r from-blue-600 to-blue-500 text-white font-bold text-lg rounded-lg hover:from-blue-700 hover:to-blue-600 transition-all shadow-lg focus:outline-none focus:ring-4 focus:ring-blue-300 disabled:bg-slate-400 disabled:cursor-not-allowed disabled:shadow-none disabled:bg-gradient-to-none"
           >
             Start Review
           </button>
