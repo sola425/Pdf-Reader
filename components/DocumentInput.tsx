@@ -2,14 +2,13 @@ import React, { useState, useCallback } from 'react';
 import { UploadIcon, XIcon } from './Icons';
 
 interface DocumentInputProps {
-  onSubmit: (data: string | File) => void;
+  onSubmit: (data: File) => void;
   savedSessionData: any | null;
   onResumeSession: () => void;
-  onClearSavedSession: () => void;
+  onClearSavedSession: () => Promise<void>;
 }
 
 export function DocumentInput({ onSubmit, savedSessionData, onResumeSession, onClearSavedSession }: DocumentInputProps) {
-  const [text, setText] = useState<string>('');
   const [fileName, setFileName] = useState<string>('');
   const [error, setError] = useState<string>('');
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
@@ -18,23 +17,10 @@ export function DocumentInput({ onSubmit, savedSessionData, onResumeSession, onC
   const handleFile = useCallback((file: File) => {
     setError('');
     if (file.type === 'application/pdf') {
-        setText(''); 
         setSelectedFile(file);
         setFileName(file.name);
-    } else if (file.type === 'text/plain') {
-        const reader = new FileReader();
-        reader.onload = (event) => {
-          const fileText = event.target?.result as string;
-          setText(fileText);
-          setSelectedFile(null);
-          setFileName(file.name);
-        };
-        reader.onerror = () => {
-             setError('Failed to read the text file.');
-        }
-        reader.readAsText(file);
     } else {
-        setError('Unsupported file type. Please upload a .txt or .pdf file.');
+        setError('Unsupported file type. Please upload a PDF file.');
         setSelectedFile(null);
         setFileName('');
     }
@@ -71,17 +57,15 @@ export function DocumentInput({ onSubmit, savedSessionData, onResumeSession, onC
     e.preventDefault();
     if (selectedFile) {
         onSubmit(selectedFile);
-    } else if (text.trim()) {
-      onSubmit(text);
     }
   };
 
-  const isSubmitDisabled = !text.trim() && !selectedFile;
+  const isSubmitDisabled = !selectedFile;
 
   return (
-    <div className="bg-white p-8 rounded-2xl shadow-lg border border-slate-200/80 w-full max-w-3xl mx-auto animate-fade-in">
+    <div className="bg-white p-6 sm:p-8 rounded-2xl shadow-lg border border-slate-200/80 w-full max-w-3xl mx-auto animate-fade-in">
       {savedSessionData && (
-        <div className="mb-6 p-4 bg-indigo-50 border border-indigo-200 rounded-lg flex items-center justify-between animate-fade-in">
+        <div className="mb-6 p-4 bg-indigo-50 border border-indigo-200 rounded-lg flex items-center justify-between animate-fade-in flex-wrap gap-2">
             <div>
                 <p className="font-semibold text-indigo-800">You have a previous session saved.</p>
                 <p className="text-sm text-indigo-700">Resume reviewing '{savedSessionData.fileData.name}'.</p>
@@ -101,9 +85,9 @@ export function DocumentInput({ onSubmit, savedSessionData, onResumeSession, onC
       )}
 
       <div className="text-center mb-8">
-        <h2 className="text-3xl font-extrabold tracking-tight text-slate-900">Start Your Review Session</h2>
-        <p className="mt-2 text-lg text-slate-600">
-          Analyze your study materials to improve comprehension and recall.
+        <h2 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-slate-900">Start Your Review Session</h2>
+        <p className="mt-2 text-base sm:text-lg text-slate-600">
+          Upload a PDF to improve your comprehension and recall.
         </p>
       </div>
       <form onSubmit={handleSubmit}>
@@ -118,32 +102,14 @@ export function DocumentInput({ onSubmit, savedSessionData, onResumeSession, onC
             <UploadIcon className="mx-auto h-12 w-12 text-slate-400" />
             <p className="text-slate-600">
               <label htmlFor="file-upload" className="font-semibold text-blue-600 hover:text-blue-700 cursor-pointer focus-within:outline-none focus-within:ring-2 focus-within:ring-offset-2 focus-within:ring-blue-500">
-                Upload a file
+                Upload a PDF
               </label>
               {' '}or drag and drop
             </p>
-            <p className="text-xs text-slate-500">PDF or TXT files supported</p>
-            <input id="file-upload" type="file" accept=".txt,.pdf" onChange={handleFileChange} className="sr-only" />
+            <p className="text-xs text-slate-500">PDF files up to 100MB</p>
+            <input id="file-upload" type="file" accept=".pdf,application/pdf" onChange={handleFileChange} className="sr-only" />
           </div>
         </div>
-
-        <div className="my-6 flex items-center">
-            <div className="flex-grow border-t border-slate-300"></div>
-            <span className="flex-shrink mx-4 text-slate-500 font-medium">Or</span>
-            <div className="flex-grow border-t border-slate-300"></div>
-        </div>
-        
-        <textarea
-          value={text}
-          onChange={(e) => {
-              setText(e.target.value);
-              setSelectedFile(null); 
-              setFileName('');
-          }}
-          placeholder="Paste your chapter or page content here..."
-          className="w-full h-40 p-4 border border-slate-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-shadow shadow-sm disabled:bg-slate-100"
-          disabled={!!selectedFile}
-        />
         
         {fileName && (
             <div className="mt-4 p-3 bg-blue-50 text-blue-800 rounded-md border border-blue-200 text-sm font-medium">

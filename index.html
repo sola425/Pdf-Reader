@@ -63,18 +63,38 @@
         border-radius: 2px;
         pointer-events: none;
       }
-
-      .search-highlight {
-        position: absolute;
+      
+      mark.search-highlight, .search-highlight {
         background-color: rgba(250, 204, 21, 0.4); /* yellow-400 */
         border-radius: 2px;
-        pointer-events: none;
         transition: background-color 0.3s ease;
       }
-      .current-search-highlight {
+      mark.current-search-highlight, .current-search-highlight {
         background-color: rgba(249, 115, 22, 0.6); /* orange-500 */
         box-shadow: 0 0 3px rgba(249, 115, 22, 0.8);
-        z-index: 10;
+      }
+      
+      /* Animations for mobile drawers */
+      @keyframes slide-in-left {
+        from { transform: translateX(-100%); }
+        to { transform: translateX(0); }
+      }
+      .animate-slide-in-left {
+        animation: slide-in-left 0.3s ease-out forwards;
+      }
+      @keyframes slide-in-right {
+        from { transform: translateX(100%); }
+        to { transform: translateX(0); }
+      }
+      .animate-slide-in-right {
+        animation: slide-in-right 0.3s ease-out forwards;
+      }
+      @keyframes fade-in {
+        from { opacity: 0; }
+        to { opacity: 1; }
+      }
+      .animate-fade-in {
+        animation: fade-in 0.3s ease-out forwards;
       }
     </style>
   </head>

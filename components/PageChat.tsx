@@ -147,13 +147,79 @@ export function PageChat({ pdfDoc, numPages, currentPage, isOpen, onClose }: Pag
     }
     
     try {
-      let fullText = '';
-      for (let i = start; i <= end; i++) {
-        const page = await pdfDoc.getPage(i);
-        const textContent = await page.getTextContent();
-        const pageText = textContent.items.map((item: any) => 'str' in item ? item.str : '').join(' ');
-        fullText += `--- Page ${i} ---\n${pageText}\n\n`;
-      }
+        let fullText = '';
+        for (let i = start; i <= end; i++) {
+            const page = await pdfDoc.getPage(i);
+            const textContent = await page.getTextContent();
+            const viewport = page.getViewport({ scale: 1 });
+            const pageWidth = viewport.width;
+
+            if (!textContent.items || textContent.items.length === 0) {
+                fullText += `--- PAGE ${i} ---\n[This page is empty or contains only images.]\n\n`;
+                continue;
+            }
+
+            const allItems = textContent.items.filter((item: any) => item.str?.trim());
+            
+            const leftItems: any[] = [];
+            const rightItems: any[] = [];
+            const midPoint = pageWidth / 2;
+
+            allItems.forEach((item: any) => {
+                if (item.transform[4] < midPoint) {
+                    leftItems.push(item);
+                } else {
+                    rightItems.push(item);
+                }
+            });
+
+            const hasSignificantContent = (items: any[]) => {
+                const totalChars = items.reduce((sum, item) => sum + item.str.length, 0);
+                return items.length > 5 && totalChars > 50;
+            };
+
+            const isMultiColumn = hasSignificantContent(leftItems) && hasSignificantContent(rightItems);
+
+            const processItems = (itemsToProcess: any[]) => {
+                itemsToProcess.sort((a: any, b: any) => {
+                    const y1 = a.transform[5];
+                    const y2 = b.transform[5];
+                    const x1 = a.transform[4];
+                    const x2 = b.transform[4];
+                    if (Math.abs(y1 - y2) > 5) return y2 - y1;
+                    return x1 - x2;
+                });
+
+                let text = '';
+                if (itemsToProcess.length > 0) {
+                    let lastY = itemsToProcess[0].transform[5];
+                    let lastHeight = itemsToProcess[0].height;
+                    for (const item of itemsToProcess) {
+                        const currentY = item.transform[5];
+                        if (Math.abs(currentY - lastY) > lastHeight * 1.5) {
+                            text += '\n';
+                        }
+                        text += item.str;
+                        if (!item.str.endsWith(' ')) text += ' ';
+                        lastY = currentY;
+                        lastHeight = item.height;
+                    }
+                }
+                return text;
+            };
+
+            let pageText = '';
+            if (isMultiColumn) {
+                const leftText = processItems(leftItems);
+                const rightText = processItems(rightItems);
+                pageText = leftText.trim() + '\n\n' + rightText.trim();
+            } else {
+                pageText = processItems(allItems);
+            }
+
+            const cleanedPageText = pageText.replace(/ +/g, ' ').replace(/ \n/g, '\n').trim();
+            fullText += `--- PAGE ${i} ---\n${cleanedPageText}\n\n`;
+        }
       
       chatSessionRef.current = startPageChatSession(fullText);
       setChatState('context_loaded');

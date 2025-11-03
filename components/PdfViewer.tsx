@@ -1,487 +1,467 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs";
 import { 
-    ChevronLeftIcon, ChevronRightIcon, ZoomInIcon, ZoomOutIcon, SearchIcon, XCircleIcon, 
-    ArrowLeftIcon, EllipsisVerticalIcon, BookOpenIcon, DocumentDuplicateIcon, XIcon
+    ChevronLeftIcon, ChevronRightIcon, ZoomInIcon, ZoomOutIcon, XCircleIcon, 
+    ArrowLeftIcon, BookOpenIcon, DocumentDuplicateIcon, XIcon,
+    ChevronDoubleLeftIcon, ChevronDoubleRightIcon, ChatBubbleIcon,
+    MenuIcon, FitToWidthIcon
 } from './Icons';
 import { Loader } from './Loader';
 import { PageChat } from './PageChat';
 import { VoiceReviewer } from './VoiceReviewer';
 import type { ReviewResult } from '../types';
+import { Thumbnail } from './Thumbnail';
 
-// It seems worker is already set in App.tsx, but good to be safe.
 const PDF_WORKER_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs";
 if (pdfjsLib.GlobalWorkerOptions.workerSrc !== PDF_WORKER_URL) {
     pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_WORKER_URL;
 }
-
-type SearchResult = {
-    pageNum: number;
-};
 
 interface PdfViewerProps {
   file: File;
   highlightText: string | null;
   targetPage: number | null;
   onPageNavigated: () => void;
-  documentText: string;
   initialReviewResult: ReviewResult | null;
   onReviewComplete: (result: ReviewResult) => void;
   setHighlightAndNavigate: (text: string | null, page: number | null) => void;
   onReset: () => void;
+  onLoadError: (message: string) => void;
 }
 
 export function PdfViewer({ 
-    file, highlightText, targetPage, onPageNavigated, documentText, initialReviewResult,
-    onReviewComplete, setHighlightAndNavigate, onReset 
+    file, highlightText, targetPage, onPageNavigated, initialReviewResult,
+    onReviewComplete, setHighlightAndNavigate, onReset, onLoadError 
 }: PdfViewerProps) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const textLayerRef = useRef<HTMLDivElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
-  const pageInputRef = useRef<HTMLInputElement>(null);
-  const pageTextCache = useRef(new Map<number, string>());
-
-  const [pdfDoc, setPdfDoc] = useState<any>(null);
-  const [currentPage, setCurrentPage] = useState(1);
+  const [pdfDoc, setPdfDoc] = useState<any | null>(null);
   const [numPages, setNumPages] = useState(0);
-  const [scale, setScale] = useState(1.5);
-  const [isRendering, setIsRendering] = useState(false);
-  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [scale, setScale] = useState(1.0);
+  const [isLoading, setIsLoading] = useState(true);
+  const [pageViewports, setPageViewports] = useState<any[]>([]);
+
+  const viewerRef = useRef<HTMLDivElement>(null);
+  const pageRefs = useRef<Array<HTMLDivElement | null>>([]);
+  const renderTaskRefs = useRef<Record<number, any>>({});
+  const renderedPages = useRef<Map<number, number>>(new Map()); // pageNum -> scale
   
-  const [thumbnails, setThumbnails] = useState<string[]>([]);
-  const [isGeneratingThumbnails, setIsGeneratingThumbnails] = useState(false);
-  
-  // UI State for new design
-  const [isOptionsMenuOpen, setIsOptionsMenuOpen] = useState(false);
+  // Pinned panel state for desktop
   const [isReviewPanelOpen, setIsReviewPanelOpen] = useState(false);
-  const [isThumbnailPanelOpen, setIsThumbnailPanelOpen] = useState(false);
+  const [isThumbnailsPanelOpen, setIsThumbnailsPanelOpen] = useState(false);
 
-  // Search state
-  const [isSearchOpen, setIsSearchOpen] = useState(false);
-  const [searchQuery, setSearchQuery] = useState('');
-  const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
-  const [currentResultIndex, setCurrentResultIndex] = useState(-1);
-  const [isSearching, setIsSearching] = useState(false);
-  const [searchMessage, setSearchMessage] = useState('');
+  // Drawer state for mobile
+  const [isMobileThumbnailsOpen, setIsMobileThumbnailsOpen] = useState(false);
+  const [isMobileReviewOpen, setIsMobileReviewOpen] = useState(false);
 
-  const renderPage = useCallback(async (pageNum: number, pdfDocument: any) => {
-    if (!pdfDocument) return;
-    setIsRendering(true);
+  const [isChatOpen, setIsChatOpen] = useState(false);
+  const [thumbnailCache, setThumbnailCache] = useState<Record<number, string>>({});
+
+  const renderPage = useCallback(async (pageNum: number) => {
+    if (!pdfDoc || !pageRefs.current[pageNum - 1]) return;
+
+    if (renderedPages.current.get(pageNum) === scale) {
+      return; // Already rendered at the correct scale
+    }
+
+    if (renderTaskRefs.current[pageNum]) {
+        renderTaskRefs.current[pageNum].cancel();
+    }
+    
+    const pageContainer = pageRefs.current[pageNum - 1];
+    if (!pageContainer) return;
+    
+    const canvas = pageContainer.querySelector('canvas');
+    const textLayer = pageContainer.querySelector('.textLayer') as HTMLDivElement;
+
+    if (!canvas || !textLayer) return;
 
     try {
-        const page = await pdfDocument.getPage(pageNum);
+        const page = await pdfDoc.getPage(pageNum);
         const viewport = page.getViewport({ scale });
-        const canvas = canvasRef.current;
-        const textLayer = textLayerRef.current;
-        const container = containerRef.current;
-        if (!canvas || !container || !textLayer) return;
+        const context = canvas.getContext('2d');
 
         canvas.height = viewport.height;
         canvas.width = viewport.width;
         
-        container.style.height = `${viewport.height}px`;
-        container.style.width = `${viewport.width}px`;
-
-        const renderContext = {
-            canvasContext: canvas.getContext('2d')!,
-            viewport: viewport,
-        };
-
-        await page.render(renderContext).promise;
-
-        textLayer.innerHTML = '';
-        textLayer.style.height = `${viewport.height}px`;
         textLayer.style.width = `${viewport.width}px`;
+        textLayer.style.height = `${viewport.height}px`;
+
+        const renderTask = page.render({ canvasContext: context!, viewport });
+        renderTaskRefs.current[pageNum] = renderTask;
+        
+        await renderTask.promise;
+        
+        renderedPages.current.set(pageNum, scale);
+        delete renderTaskRefs.current[pageNum];
 
         const textContent = await page.getTextContent();
-        await pdfjsLib.renderTextLayer({
-            textContentSource: textContent,
-            container: textLayer,
-            viewport: viewport,
-        }).promise;
-        
-    } catch (error) {
-        console.error("Error rendering page:", error);
-    } finally {
-        setIsRendering(false);
+        await pdfjsLib.renderTextLayer({ textContentSource: textContent, container: textLayer, viewport }).promise;
+    } catch (error: any) {
+        if (error.name !== 'RenderingCancelledException') {
+            console.error(`Error rendering page ${pageNum}:`, error);
+        }
     }
-  }, [scale]);
+  }, [pdfDoc, scale]);
+
+  const fitToWidth = useCallback(async (isInitial = false) => {
+      if (!pdfDoc || !viewerRef.current) return;
+      
+      const page = await pdfDoc.getPage(1); // Use page 1 for reference
+      const unscaledViewport = page.getViewport({ scale: 1 });
+      
+      const styles = window.getComputedStyle(viewerRef.current);
+      const paddingX = parseFloat(styles.paddingLeft) + parseFloat(styles.paddingRight);
+      
+      const availableWidth = viewerRef.current.clientWidth - paddingX;
+      
+      const newScale = availableWidth / unscaledViewport.width;
+      
+      // On initial load, set scale directly. Otherwise, let the scale effect handle it.
+      if(isInitial) {
+          setScale(newScale);
+      } else {
+           // Prevent re-render loop if scale is already correct
+          if (Math.abs(scale - newScale) > 0.01) {
+              setScale(newScale);
+          }
+      }
+  }, [pdfDoc, scale]);
 
   useEffect(() => {
-    const loadPdfAndThumbnails = async () => {
-      if (!file) return;
-      
-      // Reset UI state for new document
-      setIsReviewPanelOpen(false);
-      setIsThumbnailPanelOpen(false);
-      setIsOptionsMenuOpen(false);
-      
+    const loadPdf = async () => {
+      setIsLoading(true);
       setPdfDoc(null);
-      setThumbnails([]);
       setNumPages(0);
-      pageTextCache.current.clear();
-      setIsGeneratingThumbnails(true);
-      clearSearch();
+      setPageViewports([]);
+      pageRefs.current = [];
+      renderedPages.current.clear();
+      setThumbnailCache({});
+      try {
+        const fileUrl = URL.createObjectURL(file);
+        const loadingTask = pdfjsLib.getDocument(fileUrl);
+        const doc = await loadingTask.promise;
+        setPdfDoc(doc);
+        setNumPages(doc.numPages);
 
-      const arrayBuffer = await file.arrayBuffer();
-      const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
-      const pdf = await loadingTask.promise;
-      setPdfDoc(pdf);
-      setNumPages(pdf.numPages);
-      setCurrentPage(1);
-
-      const THUMBNAIL_WIDTH = 120;
-      const thumbnailPromises = Array.from({ length: pdf.numPages }, (_, i) => i + 1).map(async pageNum => {
-          const page = await pdf.getPage(pageNum);
-          const viewport = page.getViewport({ scale: 1 });
-          const scale = THUMBNAIL_WIDTH / viewport.width;
-          const thumbViewport = page.getViewport({ scale });
-          
-          const tempCanvas = document.createElement('canvas');
-          tempCanvas.width = thumbViewport.width;
-          tempCanvas.height = thumbViewport.height;
-          const canvasContext = tempCanvas.getContext('2d')!;
-          
-          await page.render({ canvasContext, viewport: thumbViewport }).promise;
-          return tempCanvas.toDataURL();
-      });
-      
-      const thumbUrls = await Promise.all(thumbnailPromises);
-      setThumbnails(thumbUrls);
-      setIsGeneratingThumbnails(false);
+        const viewports = [];
+        for (let i = 1; i <= doc.numPages; i++) {
+            const page = await doc.getPage(i);
+            viewports.push(page.getViewport({ scale: 1 }));
+        }
+        setPageViewports(viewports);
+        URL.revokeObjectURL(fileUrl);
+        setIsLoading(false);
+      } catch (error) {
+        console.error("Error loading PDF:", error);
+        onLoadError("Failed to load PDF. The file might be corrupted or unsupported.");
+      }
     };
-    loadPdfAndThumbnails();
-  }, [file]);
-
-  useEffect(() => {
-    if (pdfDoc) {
-      renderPage(currentPage, pdfDoc);
-    }
-  }, [pdfDoc, currentPage, renderPage]);
+    if (file) loadPdf();
+  }, [file, onLoadError]);
   
   useEffect(() => {
-      if (targetPage && targetPage !== currentPage) {
-          setCurrentPage(targetPage);
-          onPageNavigated();
-      }
-  }, [targetPage, currentPage, onPageNavigated]);
-
-  useEffect(() => {
-    if (highlightText && !isRendering && textLayerRef.current) {
-        const textLayer = textLayerRef.current;
-        Array.from(textLayer.querySelectorAll('span.temporary-highlight')).forEach(el => (el as Element).classList.remove('temporary-highlight'));
-
-        const spans = Array.from(textLayer.querySelectorAll('span[role="presentation"]')) as HTMLElement[];
-        const allText = spans.map(s => s.textContent || '').join('');
-        const startIndex = allText.indexOf(highlightText);
-        if (startIndex === -1) return;
-
-        let charCount = 0;
-        let found = false;
-        for (const span of spans) {
-            const spanText = span.textContent || '';
-            const nextCharCount = charCount + spanText.length;
-            if (startIndex < nextCharCount && startIndex + highlightText.length > charCount) {
-                span.classList.add('temporary-highlight');
-                if (!found) {
-                     span.scrollIntoView({ behavior: 'smooth', block: 'center' });
-                     found = true;
-                }
-            }
-            charCount = nextCharCount;
-            if (charCount > startIndex + highlightText.length) break;
-        }
+    if (pageViewports.length > 0) {
+      fitToWidth(true);
     }
-  }, [highlightText, currentPage, isRendering]);
+  }, [pageViewports, fitToWidth]);
 
   useEffect(() => {
-    const textLayer = textLayerRef.current;
-    if (!textLayer || isRendering) return;
+    const container = viewerRef.current;
+    if (!container || !pdfDoc) return;
+    const resizeObserver = new ResizeObserver(() => {
+        fitToWidth(false);
+    });
+    resizeObserver.observe(container);
+    return () => resizeObserver.disconnect();
+  }, [pdfDoc, fitToWidth]);
+  
+  // Effect for IntersectionObserver to render pages and update current page
+  useEffect(() => {
+      const viewer = viewerRef.current;
+      if (!viewer || numPages === 0) return;
 
-    const unwrapMarks = (node: Element) => {
-        const marks = Array.from(node.querySelectorAll('mark.search-highlight'));
-        marks.forEach(mark => {
-            const parent = mark.parentNode;
-            if (parent) {
-                while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
-                parent.removeChild(mark);
-                parent.normalize();
+      const observer = new IntersectionObserver(
+          (entries) => {
+              let mostVisiblePage = null;
+              let maxVisibility = -1;
+
+              entries.forEach(entry => {
+                  const pageNum = parseInt((entry.target as HTMLElement).dataset.pageNumber!, 10);
+                  if (entry.isIntersecting) {
+                      renderPage(pageNum);
+                  }
+                  
+                  // Update current page based on which page is most visible
+                  if (entry.intersectionRatio > maxVisibility) {
+                      maxVisibility = entry.intersectionRatio;
+                      mostVisiblePage = pageNum;
+                  }
+              });
+
+              if (mostVisiblePage) {
+                  setCurrentPage(mostVisiblePage);
+              }
+          },
+          { root: viewer, threshold: [0, 0.25, 0.5, 0.75, 1] }
+      );
+
+      pageRefs.current.forEach(ref => {
+          if (ref) observer.observe(ref);
+      });
+
+      return () => observer.disconnect();
+  }, [numPages, renderPage]);
+
+  // Effect to handle scale changes - clear existing renders
+  useEffect(() => {
+    if (!pdfDoc) return;
+    renderedPages.current.clear();
+    // Re-render currently visible pages
+    pageRefs.current.forEach((ref, index) => {
+      const pageNum = index + 1;
+      // A simple check if the ref is in the viewport (might not be perfect)
+      if (ref && ref.getBoundingClientRect().top < window.innerHeight && ref.getBoundingClientRect().bottom > 0) {
+        renderPage(pageNum);
+      }
+    });
+  }, [scale, pdfDoc, renderPage]);
+
+  const scrollToPage = (num: number) => {
+    const pageNum = Math.min(Math.max(1, num), numPages);
+    pageRefs.current[pageNum - 1]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+  
+  useEffect(() => {
+    if (targetPage) {
+      scrollToPage(targetPage);
+      onPageNavigated();
+    }
+  }, [targetPage, onPageNavigated]); // Removed currentPage dependency
+
+  useEffect(() => {
+    // Clear all old highlights first
+    pageRefs.current.forEach(pageRef => {
+        pageRef?.querySelectorAll('.temporary-highlight').forEach(el => {
+            // A bit of a hack to unwrap the span without losing the text node
+            const parent = el.parentNode;
+            while (el.firstChild) {
+                parent?.insertBefore(el.firstChild, el);
             }
+            parent?.removeChild(el);
         });
-    };
-    unwrapMarks(textLayer);
-
-    if (!searchQuery) return;
-
-    const spans = Array.from(textLayer.querySelectorAll('span[role="presentation"]')) as HTMLElement[];
-    const regex = new RegExp(searchQuery.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&'), 'gi');
-    spans.forEach(span => {
-        const text = span.textContent;
-        if (!text || !text.match(regex)) return;
-        
-        const fragment = document.createDocumentFragment();
-        let lastIndex = 0;
-        let match;
-        regex.lastIndex = 0;
-        while ((match = regex.exec(text)) !== null) {
-            if (match.index > lastIndex) fragment.appendChild(document.createTextNode(text.substring(lastIndex, match.index)));
-            const mark = document.createElement('mark');
-            mark.className = 'search-highlight';
-            mark.textContent = match[0];
-            fragment.appendChild(mark);
-            lastIndex = regex.lastIndex;
-        }
-        if (lastIndex < text.length) fragment.appendChild(document.createTextNode(text.substring(lastIndex)));
-        span.replaceChildren(fragment);
     });
 
-    if (currentResultIndex !== -1 && searchResults[currentResultIndex]?.pageNum === currentPage) {
-        const allPageMarks = Array.from(textLayer.querySelectorAll('mark.search-highlight')) as HTMLElement[];
-        const matchesOnThisPage = searchResults.filter(r => r.pageNum === currentPage);
-        const globalIndexOfFirstMatchOnPage = searchResults.findIndex(r => r.pageNum === currentPage);
-        const localMatchIndex = currentResultIndex - globalIndexOfFirstMatchOnPage;
-        const currentMark = allPageMarks[localMatchIndex];
-        if (currentMark) {
-            currentMark.classList.add('current-search-highlight');
-            currentMark.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+    if (!highlightText) return;
+    
+    const pageContainer = pageRefs.current[currentPage - 1];
+    const textLayer = pageContainer?.querySelector('.textLayer');
+
+    if (!textLayer) return;
+
+    const walker = document.createTreeWalker(textLayer, NodeFilter.SHOW_TEXT, null);
+    const ranges = [];
+    let node;
+    while (node = walker.nextNode()) {
+        const text = node.nodeValue || '';
+        let index = text.indexOf(highlightText);
+        while (index !== -1) {
+            const range = document.createRange();
+            range.setStart(node, index);
+            range.setEnd(node, index + highlightText.length);
+            ranges.push(range);
+            index = text.indexOf(highlightText, index + 1);
         }
     }
-  }, [isRendering, searchQuery, currentResultIndex, searchResults, currentPage]);
+    ranges.forEach(range => {
+        const highlightSpan = document.createElement('span');
+        highlightSpan.className = 'temporary-highlight';
+        try { range.surroundContents(highlightSpan); } 
+        catch(e) { console.warn("Could not highlight text across multiple elements:", highlightText); }
+    });
+  }, [highlightText, currentPage]);
 
-  const goToPrevPage = () => setCurrentPage(prev => Math.max(1, prev - 1));
-  const goToNextPage = () => setCurrentPage(prev => Math.min(numPages, prev + 1));
-  const zoomIn = () => setScale(prev => Math.min(3, prev + 0.25));
-  const zoomOut = () => setScale(prev => Math.max(0.5, prev - 0.25));
+  const handleThumbGenerated = useCallback((pageNum: number, dataUrl: string) => {
+    setThumbnailCache(prev => ({ ...prev, [pageNum]: dataUrl }));
+  }, []);
   
-  const handlePageInputChange = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if(e.key === 'Enter') {
-        const newPage = parseInt(e.currentTarget.value, 10);
-        if (!isNaN(newPage)) setCurrentPage(Math.max(1, Math.min(newPage, numPages)));
-        e.currentTarget.blur();
-    }
-  };
-  const handlePageInputBlur = (e: React.FocusEvent<HTMLInputElement>) => {
-      const newPage = parseInt(e.target.value, 10);
-      e.target.value = (!isNaN(newPage) && newPage >= 1 && newPage <= numPages) ? newPage.toString() : currentPage.toString();
-  };
+  const ThumbnailsList = (
+    <div className="grid grid-cols-1 gap-3">
+        {Array.from({ length: numPages }, (_, i) => i + 1).map(pageNum => (
+            <Thumbnail
+                key={pageNum}
+                pdfDoc={pdfDoc}
+                pageNum={pageNum}
+                cachedThumb={thumbnailCache[pageNum] || null}
+                onThumbGenerated={handleThumbGenerated}
+                onClick={() => {
+                  scrollToPage(pageNum);
+                  setIsMobileThumbnailsOpen(false);
+                }}
+                isActive={currentPage === pageNum}
+            />
+        ))}
+    </div>
+  );
 
-  const getPageText = async (pageNum: number) => {
-    if (pageTextCache.current.has(pageNum)) return pageTextCache.current.get(pageNum)!;
-    const page = await pdfDoc.getPage(pageNum);
-    const textContent = await page.getTextContent();
-    const pageText = textContent.items.map((item: any) => 'str' in item ? item.str : '').join('');
-    pageTextCache.current.set(pageNum, pageText);
-    return pageText;
-  };
-
-  const performSearch = async () => {
-    if (!searchQuery || !pdfDoc) return;
-    setIsSearching(true);
-    setSearchMessage('Searching...');
-    setSearchResults([]);
-    setCurrentResultIndex(-1);
-    const allMatches: SearchResult[] = [];
-    for (let i = 1; i <= pdfDoc.numPages; i++) {
-        const pageText = await getPageText(i);
-        if (pageText.toLowerCase().includes(searchQuery.toLowerCase())) {
-            const count = pageText.toLowerCase().split(searchQuery.toLowerCase()).length - 1;
-            for(let j=0; j<count; j++) allMatches.push({ pageNum: i });
-        }
-    }
-    setSearchResults(allMatches);
-    setSearchMessage(`${allMatches.length} result${allMatches.length === 1 ? '' : 's'} found.`);
-    if (allMatches.length > 0) navigateToResult(0);
-    setIsSearching(false);
-  };
-
-  const navigateToResult = (index: number) => {
-    if (index < 0 || index >= searchResults.length) return;
-    const result = searchResults[index];
-    setCurrentResultIndex(index);
-    if (result.pageNum !== currentPage) setCurrentPage(result.pageNum);
-  };
-  const goToNextResult = () => navigateToResult(searchResults.length > 0 ? (currentResultIndex + 1) % searchResults.length : -1);
-  const goToPrevResult = () => navigateToResult(searchResults.length > 0 ? (currentResultIndex - 1 + searchResults.length) % searchResults.length : -1);
-
-  const clearSearch = () => {
-    setIsSearchOpen(false);
-    setSearchQuery('');
-    setSearchResults([]);
-    setCurrentResultIndex(-1);
-    setSearchMessage('');
-  };
+  if (isLoading || pageViewports.length === 0) {
+      return (
+        <div className="min-h-screen bg-slate-100 flex flex-col items-center justify-center">
+            <Loader />
+            <p className="mt-4 text-slate-600 font-semibold">Preparing Document...</p>
+        </div>
+      );
+  }
 
   return (
-    <div className="h-screen w-screen bg-slate-200 flex flex-col fixed inset-0">
-      
-      {/* Top Header */}
-      <header className="absolute top-0 left-0 right-0 z-20 bg-white/80 backdrop-blur-md shadow-sm transition-transform duration-300">
-        {!isSearchOpen ? (
-            <div className="h-14 flex items-center justify-between px-2 sm:px-4">
-                <button onClick={onReset} className="p-2 rounded-full hover:bg-slate-200" aria-label="Go Back">
-                    <ArrowLeftIcon className="w-6 h-6 text-slate-700" />
-                </button>
-                <h1 className="text-slate-800 font-semibold text-center truncate px-2">{file.name}</h1>
-                <button onClick={() => setIsOptionsMenuOpen(true)} className="p-2 rounded-full hover:bg-slate-200" aria-label="Options">
-                    <EllipsisVerticalIcon className="w-6 h-6 text-slate-700" />
-                </button>
-            </div>
-        ) : (
-             <div className="h-14 flex items-center gap-1 px-2">
-                <input 
-                    type="text"
-                    placeholder="Search document..."
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && performSearch()}
-                    className="px-2 py-1 border-0 bg-transparent focus:ring-0 w-full flex-grow text-slate-800"
-                    autoFocus
-                />
-                <button onClick={performSearch} className="p-2 rounded-md hover:bg-slate-200 text-slate-600" aria-label="Execute search">
-                    {isSearching ? <div className="w-4 h-4 border-2 border-t-blue-500 border-slate-200 rounded-full animate-spin"></div> : <SearchIcon className="w-5 h-5"/>}
-                </button>
-                <button onClick={clearSearch} className="p-2 rounded-md hover:bg-slate-200 text-slate-600" aria-label="Close search">
-                    <XCircleIcon className="w-6 h-6 text-slate-500" />
-                </button>
-            </div>
-        )}
-      </header>
-
-      {/* Main Content */}
-      <main className="flex-1 overflow-auto pt-16 pb-20">
-            <div ref={containerRef} className="relative mx-auto shadow-xl bg-white">
-                <canvas ref={canvasRef}></canvas>
-                <div ref={textLayerRef} className="textLayer"></div>
-            </div>
-            {isRendering && (
-                <div className="absolute inset-0 flex items-center justify-center bg-white/50 z-10">
-                    <Loader />
-                </div>
-            )}
-      </main>
-
-      {/* Floating Bottom Controls */}
-      <footer className="absolute bottom-0 left-0 right-0 z-20 p-2 flex justify-center">
-          <div className="bg-white/80 backdrop-blur-md shadow-lg rounded-xl flex items-center justify-center gap-2 p-2">
-             {searchResults.length > 0 && isSearchOpen ? (
-                <>
-                    <button onClick={goToPrevResult} className="p-2 rounded-md hover:bg-slate-200 text-slate-600" aria-label="Previous match">
-                        <ChevronLeftIcon className="w-5 h-5" />
-                    </button>
-                    <span className="text-sm text-slate-600 min-w-[70px] text-center font-medium">
-                        {`${currentResultIndex + 1} / ${searchResults.length}`}
-                    </span>
-                    <button onClick={goToNextResult} className="p-2 rounded-md hover:bg-slate-200 text-slate-600" aria-label="Next match">
-                        <ChevronRightIcon className="w-5 h-5" />
-                    </button>
-                </>
-             ) : (
-                <>
-                    <button onClick={goToPrevPage} disabled={currentPage <= 1} className="p-2 rounded-md hover:bg-slate-100 disabled:opacity-50 text-slate-600" aria-label="Previous Page">
-                        <ChevronLeftIcon className="w-5 h-5" />
-                    </button>
-                    <div className="flex items-center gap-1.5">
-                        <input 
-                            ref={pageInputRef}
-                            type="number" 
-                            defaultValue={currentPage}
-                            onKeyDown={handlePageInputChange} 
-                            onBlur={handlePageInputBlur}
-                            className="w-14 p-1 text-center border border-slate-300 rounded-md"
-                        />
-                        <span className="text-slate-600">/ {numPages || '...'}</span>
-                    </div>
-                    <button onClick={goToNextPage} disabled={currentPage >= numPages} className="p-2 rounded-md hover:bg-slate-100 disabled:opacity-50 text-slate-600" aria-label="Next Page">
-                        <ChevronRightIcon className="w-5 h-5" />
-                    </button>
-                    <div className="h-6 w-px bg-slate-300 mx-2"></div>
-                    <button onClick={zoomOut} className="p-2 rounded-md hover:bg-slate-100 text-slate-600" aria-label="Zoom Out">
-                        <ZoomOutIcon className="w-5 h-5" />
-                    </button>
-                    <span className="text-sm font-medium text-slate-700 w-16 text-center">{`${Math.round(scale * 100)}%`}</span>
-                    <button onClick={zoomIn} className="p-2 rounded-md hover:bg-slate-100 text-slate-600" aria-label="Zoom In">
-                        <ZoomInIcon className="w-5 h-5" />
-                    </button>
-                </>
-             )}
+    <div className="h-screen w-screen bg-slate-200 flex flex-col overflow-hidden">
+      <header className="bg-slate-800 text-white p-2 flex items-center justify-between z-20 shadow-md flex-shrink-0 sticky top-0">
+          {/* Mobile Header */}
+          <div className="flex lg:hidden items-center justify-between w-full">
+              <button onClick={() => setIsMobileThumbnailsOpen(true)} className="p-2 rounded-md hover:bg-slate-700" aria-label="Open thumbnails panel">
+                  <MenuIcon className="w-6 h-6" />
+              </button>
+              <div className="text-sm font-semibold">
+                  Page {currentPage} of {numPages}
+              </div>
+              <button onClick={() => setIsMobileReviewOpen(true)} className="p-2 rounded-md hover:bg-slate-700" aria-label="Open review panel">
+                  <BookOpenIcon className="w-6 h-6" />
+              </button>
           </div>
-      </footer>
 
-      {/* Options Menu Modal */}
-      {isOptionsMenuOpen && (
-        <>
-            <div onClick={() => setIsOptionsMenuOpen(false)} className="fixed inset-0 bg-black/30 z-30 animate-fade-in"></div>
-            <div className="fixed bottom-0 left-0 right-0 z-40 bg-white rounded-t-2xl shadow-2xl p-4 transition-transform duration-300 ease-in-out transform translate-y-0">
-                <style>{`
-                  @keyframes slide-up { from { transform: translateY(100%); } to { transform: translateY(0); } }
-                  .animate-slide-up { animation: slide-up 0.3s ease-out; }
-                  @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
-                  .animate-fade-in { animation: fade-in 0.3s ease-out; }
-                `}</style>
-                <div className="grid grid-cols-1 divide-y divide-slate-200">
-                    <button onClick={() => { setIsReviewPanelOpen(true); setIsOptionsMenuOpen(false); }} className="flex items-center gap-4 py-3 text-left text-lg text-slate-700 font-medium hover:bg-slate-100 rounded-lg px-2">
-                        <BookOpenIcon className="w-6 h-6 text-blue-600" /> Comprehensive Review
-                    </button>
-                    <button onClick={() => { setIsThumbnailPanelOpen(true); setIsOptionsMenuOpen(false); }} className="flex items-center gap-4 py-3 text-left text-lg text-slate-700 font-medium hover:bg-slate-100 rounded-lg px-2">
-                        <DocumentDuplicateIcon className="w-6 h-6 text-blue-600" /> Pages
-                    </button>
-                    <button onClick={() => { setIsSearchOpen(true); setIsOptionsMenuOpen(false); }} className="flex items-center gap-4 py-3 text-left text-lg text-slate-700 font-medium hover:bg-slate-100 rounded-lg px-2">
-                        <SearchIcon className="w-6 h-6 text-blue-600" /> Search
-                    </button>
-                </div>
-            </div>
-        </>
-      )}
-
-      {/* Review Panel Modal */}
-      <div className={`fixed inset-0 z-30 bg-black/30 transition-opacity duration-300 ${isReviewPanelOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'}`} onClick={() => setIsReviewPanelOpen(false)}></div>
-      <aside className={`transform transition-transform duration-300 ease-in-out fixed top-0 right-0 h-full w-full max-w-sm z-40 md:w-[26rem] md:max-w-none ${isReviewPanelOpen ? 'translate-x-0' : 'translate-x-full'}`}>
-          {isReviewPanelOpen && <VoiceReviewer 
-              documentText={documentText} 
-              setHighlightAndNavigate={setHighlightAndNavigate}
-              onReviewComplete={onReviewComplete}
-              initialReviewResult={initialReviewResult}
-              onClose={() => setIsReviewPanelOpen(false)}
-          />}
-      </aside>
-
-      {/* Thumbnail Panel Modal */}
-      <div className={`fixed inset-0 z-30 bg-black/30 transition-opacity duration-300 ${isThumbnailPanelOpen ? 'opacity-100' : 'opacity-0 pointer-events-none'}`} onClick={() => setIsThumbnailPanelOpen(false)}></div>
-      <aside className={`transform transition-transform duration-300 ease-in-out fixed top-0 left-0 h-full w-full max-w-xs z-40 bg-slate-100 shadow-xl ${isThumbnailPanelOpen ? 'translate-x-0' : '-translate-x-full'}`}>
-          {isThumbnailPanelOpen && <div className="h-full flex flex-col">
-              <div className="p-4 flex justify-between items-center border-b bg-white flex-shrink-0">
-                  <h3 className="font-bold text-slate-800">Pages</h3>
-                  <button onClick={() => setIsThumbnailPanelOpen(false)} className="p-1 rounded-full hover:bg-slate-200">
-                      <XIcon className="w-5 h-5 text-slate-600" />
+          {/* Desktop Header */}
+          <div className="hidden lg:flex items-center justify-between w-full">
+              <div className="flex items-center gap-4">
+                  <button onClick={onReset} className="flex items-center gap-2 px-3 py-1.5 rounded-md hover:bg-slate-700 transition-colors">
+                      <ArrowLeftIcon className="w-5 h-5" />
+                      <span className="font-semibold text-sm">New File</span>
+                  </button>
+                  <div className="w-px h-6 bg-slate-600"></div>
+                  <button onClick={() => setIsThumbnailsPanelOpen(p => !p)} className={`px-3 py-1.5 rounded-md transition-colors ${isThumbnailsPanelOpen ? 'bg-blue-600' : 'hover:bg-slate-700'}`} aria-label="Toggle thumbnails panel">
+                      <DocumentDuplicateIcon className="w-5 h-5" />
                   </button>
               </div>
-              <div className="flex-grow overflow-y-auto p-4 grid grid-cols-2 gap-4">
-                  {isGeneratingThumbnails && <div className="col-span-2 flex justify-center pt-8"><Loader /></div>}
-                  {thumbnails.map((src, index) => {
-                      const pageNum = index + 1;
-                      return (
-                          <div 
-                              key={index} 
-                              onClick={() => { setCurrentPage(pageNum); setIsThumbnailPanelOpen(false); }} 
-                              className={`cursor-pointer border-2 p-1 ${currentPage === pageNum ? 'border-blue-500' : 'border-transparent'} rounded-md hover:border-blue-400 bg-white`}
-                              role="button" tabIndex={0} onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && setCurrentPage(pageNum)}
-                          >
-                              <img src={src} alt={`Page ${pageNum}`} className="shadow-md rounded-sm w-full" />
-                              <p className="text-center text-xs font-semibold text-slate-700 mt-1">{pageNum}</p>
-                          </div>
-                      );
-                  })}
+              
+              <div className="flex items-center gap-2">
+                  <button onClick={() => scrollToPage(1)} disabled={currentPage === 1} className="p-1.5 rounded-md disabled:opacity-50 hover:bg-slate-700"><ChevronDoubleLeftIcon className="w-5 h-5" /></button>
+                  <button onClick={() => scrollToPage(currentPage - 1)} disabled={currentPage === 1} className="p-1.5 rounded-md disabled:opacity-50 hover:bg-slate-700"><ChevronLeftIcon className="w-5 h-5" /></button>
+                  <div className="text-sm">
+                      <span>Page </span>
+                      <input type="number" value={currentPage} onChange={e => setCurrentPage(parseInt(e.target.value,10) || 1)} onBlur={(e) => scrollToPage(parseInt(e.target.value, 10))} onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()} className="w-12 text-center bg-slate-900 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500" />
+                      <span> of {numPages}</span>
+                  </div>
+                  <button onClick={() => scrollToPage(currentPage + 1)} disabled={currentPage === numPages} className="p-1.5 rounded-md disabled:opacity-50 hover:bg-slate-700"><ChevronRightIcon className="w-5 h-5" /></button>
+                  <button onClick={() => scrollToPage(numPages)} disabled={currentPage === numPages} className="p-1.5 rounded-md disabled:opacity-50 hover:bg-slate-700"><ChevronDoubleRightIcon className="w-5 h-5" /></button>
               </div>
-          </div>}
-      </aside>
 
-      <PageChat 
-        pdfDoc={pdfDoc} 
-        numPages={numPages} 
-        currentPage={currentPage} 
-        isOpen={isChatOpen} 
-        onClose={() => setIsChatOpen(false)} 
-      />
+              <div className="flex items-center gap-4">
+                  <div className="flex items-center gap-1">
+                    <button onClick={() => setScale(s => Math.max(0.25, s - 0.25))} className="p-1.5 rounded-md hover:bg-slate-700" aria-label="Zoom out"><ZoomOutIcon className="w-5 h-5" /></button>
+                    <button onClick={() => fitToWidth(false)} className="p-1.5 rounded-md hover:bg-slate-700" title="Fit to Width" aria-label="Fit to width"><FitToWidthIcon className="w-5 h-5" /></button>
+                    <button onClick={() => setScale(s => Math.min(3, s + 0.25))} className="p-1.5 rounded-md hover:bg-slate-700" aria-label="Zoom in"><ZoomInIcon className="w-5 h-5" /></button>
+                    <span className="text-sm font-semibold w-12 text-center">{(scale * 100).toFixed(0)}%</span>
+                  </div>
+                  <div className="w-px h-6 bg-slate-600"></div>
+                  <button onClick={() => setIsChatOpen(true)} className="flex items-center gap-2 px-3 py-1.5 rounded-md hover:bg-slate-700 transition-colors">
+                      <ChatBubbleIcon className="w-5 h-5" />
+                      <span className="font-semibold text-sm">Chat</span>
+                  </button>
+                  <button onClick={() => setIsReviewPanelOpen(p => !p)} className={`px-3 py-1.5 rounded-md transition-colors ${isReviewPanelOpen ? 'bg-blue-600' : 'hover:bg-slate-700'}`} aria-label="Toggle review panel">
+                      <BookOpenIcon className="w-5 h-5" />
+                  </button>
+              </div>
+          </div>
+      </header>
+
+      <div className="flex-1 flex overflow-hidden">
+        {/* DESKTOP THUMBNAILS - pinned */}
+        <aside className={`hidden lg:block flex-shrink-0 bg-slate-300 shadow-lg overflow-y-auto transition-all duration-300 ${isThumbnailsPanelOpen ? 'w-48 p-2' : 'w-0 p-0'}`}>
+          {isThumbnailsPanelOpen && ThumbnailsList}
+        </aside>
+
+        {/* MOBILE THUMBNAILS - drawer */}
+        {isMobileThumbnailsOpen && (
+          <>
+            <div onClick={() => setIsMobileThumbnailsOpen(false)} className="fixed inset-0 bg-black/60 z-30 lg:hidden animate-fade-in" aria-hidden="true"/>
+            <aside className="fixed top-0 left-0 bottom-0 w-64 bg-slate-300 z-40 lg:hidden p-2 overflow-y-auto shadow-lg animate-slide-in-left">
+              <div className="flex justify-between items-center mb-2 p-1">
+                <h3 className="font-bold text-slate-800 text-lg">Pages</h3>
+                <button onClick={() => setIsMobileThumbnailsOpen(false)} className="p-1 rounded-full hover:bg-slate-400" aria-label="Close thumbnails panel"><XIcon className="w-6 h-6 text-slate-700"/></button>
+              </div>
+              {ThumbnailsList}
+            </aside>
+          </>
+        )}
+
+        <main className="flex-1 overflow-auto bg-slate-200 p-4 md:p-8" ref={viewerRef}>
+          <div className="flex flex-col items-center gap-4 md:gap-8">
+            {Array.from({ length: numPages }, (_, i) => i + 1).map(pageNum => {
+                const viewport = pageViewports[pageNum - 1];
+                const placeholderStyle = viewport ? {
+                    width: viewport.width * scale,
+                    height: viewport.height * scale,
+                } : { height: '1000px' }; // Fallback height
+
+                return (
+                    <div
+                        key={pageNum}
+                        ref={el => pageRefs.current[pageNum-1] = el}
+                        data-page-number={pageNum}
+                        className="relative mx-auto shadow-xl bg-white"
+                        style={placeholderStyle}
+                    >
+                        <canvas className="block" />
+                        <div className="textLayer" />
+                    </div>
+                )
+            })}
+          </div>
+        </main>
+        
+        {/* DESKTOP REVIEW - pinned */}
+        <aside className={`hidden lg:flex flex-col flex-shrink-0 bg-white border-l border-slate-300 transition-all duration-300 overflow-hidden ${isReviewPanelOpen ? 'w-full max-w-md' : 'w-0'}`}>
+          {isReviewPanelOpen && pdfDoc && (
+            <VoiceReviewer pdfDoc={pdfDoc} numPages={numPages} currentPage={currentPage} setHighlightAndNavigate={setHighlightAndNavigate} onReviewComplete={onReviewComplete} initialReviewResult={initialReviewResult} onClose={() => setIsReviewPanelOpen(false)} />
+          )}
+        </aside>
+        
+        {/* MOBILE REVIEW - drawer */}
+        {isMobileReviewOpen && (
+          <>
+            <div onClick={() => setIsMobileReviewOpen(false)} className="fixed inset-0 bg-black/60 z-30 lg:hidden animate-fade-in" aria-hidden="true"/>
+            <aside className="fixed top-0 right-0 bottom-0 w-full max-w-md bg-white z-40 lg:hidden shadow-lg animate-slide-in-right">
+              <VoiceReviewer pdfDoc={pdfDoc} numPages={numPages} currentPage={currentPage} setHighlightAndNavigate={setHighlightAndNavigate} onReviewComplete={onReviewComplete} initialReviewResult={initialReviewResult} onClose={() => setIsMobileReviewOpen(false)} />
+            </aside>
+          </>
+        )}
+
+        <PageChat pdfDoc={pdfDoc} numPages={numPages} currentPage={currentPage} isOpen={isChatOpen} onClose={() => setIsChatOpen(false)} />
+      </div>
+
+       {/* Mobile Controls Footer */}
+       <div className="lg:hidden fixed bottom-0 left-0 right-0 bg-slate-800/90 backdrop-blur-sm text-white p-2 shadow-t-lg z-20 flex justify-around items-center gap-4">
+          <div className="flex items-center gap-1">
+            <button onClick={() => scrollToPage(currentPage - 1)} disabled={currentPage <= 1} className="p-2 rounded-md disabled:opacity-50 hover:bg-slate-700"><ChevronLeftIcon className="w-6 h-6" /></button>
+            <div className="text-sm font-medium">
+                <input 
+                  type="number" 
+                  value={currentPage} 
+                  onChange={e => setCurrentPage(parseInt(e.target.value,10) || 1)} 
+                  onBlur={(e) => scrollToPage(parseInt(e.target.value, 10))}
+                  onKeyDown={(e) => e.key === 'Enter' && (e.target as HTMLInputElement).blur()}
+                  className="w-12 text-center bg-slate-900 rounded-md py-1"
+                  aria-label="Current page"
+                />
+                <span className="px-1">/</span>
+                <span>{numPages}</span>
+            </div>
+            <button onClick={() => scrollToPage(currentPage + 1)} disabled={currentPage >= numPages} className="p-2 rounded-md disabled:opacity-50 hover:bg-slate-700"><ChevronRightIcon className="w-6 h-6" /></button>
+          </div>
+          <div className="flex items-center gap-1">
+            <button onClick={() => setScale(s => Math.max(0.25, s - 0.25))} className="p-2 rounded-md hover:bg-slate-700" aria-label="Zoom out"><ZoomOutIcon className="w-6 h-6" /></button>
+            <button onClick={() => fitToWidth(false)} className="p-2 rounded-md hover:bg-slate-700" aria-label="Fit to width"><FitToWidthIcon className="w-6 h-6" /></button>
+            <button onClick={() => setScale(s => Math.min(3, s + 0.25))} className="p-2 rounded-md hover:bg-slate-700" aria-label="Zoom in"><ZoomInIcon className="w-6 h-6" /></button>
+          </div>
+       </div>
     </div>
   );
 }

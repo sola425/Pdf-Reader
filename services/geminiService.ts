@@ -75,7 +75,7 @@ export async function getReview(documentText: string, userSummary: string): Prom
     2.  Calculate a comprehension score from 0 to 100, where 100 represents perfect comprehension and recall of all key points. The score should reflect how much of the original text's core information is present in the user's summary.
     3.  Provide a short, one-sentence rationale explaining the score. For example: "Your score reflects a good grasp of the main topics, but you missed several key definitions."
     4.  Provide a brief, positive summary of the key points the user correctly mentioned.
-    5.  Identify the key points or important details from the original document that the user missed in their summary. For each missed point, provide:
+    5.  Identify the key points or important details from the original document that the user missed in their summary. It is very important that you identify several missed points. Even if the summary is good, there are always nuances or details that can be highlighted for improvement. Be critical in your analysis. For each missed point, provide:
         a. The missed point itself.
         b. A specific, brief quote or example from the original document that directly illustrates it.
         c. The page number where this quote appears, referencing the '--- PAGE X ---' markers in the text.

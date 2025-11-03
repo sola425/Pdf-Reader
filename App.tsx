@@ -5,13 +5,13 @@ import { LogoIcon, XCircleIcon } from './components/Icons';
 import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs";
 import { Loader } from './components/Loader';
 import type { ReviewResult } from './types';
+import * as db from './utils/db';
 
 // Set up the PDF.js worker.
 const PDF_WORKER_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs";
 pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_WORKER_URL;
 
 const SESSION_KEY = 'recallReaderSession';
-const MAX_SESSION_FILE_SIZE = 2 * 1024 * 1024; // 2MB
 
 export default function App() {
   if (!process.env.API_KEY) {
@@ -31,10 +31,8 @@ export default function App() {
     );
   }
 
-  const [documentText, setDocumentText] = useState<string>('');
   const [pdfFile, setPdfFile] = useState<File | null>(null);
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
-  const [processingProgress, setProcessingProgress] = useState<{ current: number, total: number } | null>(null);
   const [error, setError] = useState<string>('');
   const [view, setView] = useState<'input' | 'review'>('input');
   const [highlightText, setHighlightText] = useState<string | null>(null);
@@ -48,42 +46,32 @@ export default function App() {
   const highlightTimeoutRef = useRef<number | null>(null);
   const appStateRef = useRef<any>();
 
-  appStateRef.current = { pdfFile, documentText, reviewResult, view };
+  appStateRef.current = { pdfFile, reviewResult, view };
 
   const saveSession = useCallback(async () => {
     const currentState = appStateRef.current;
     if (!currentState.pdfFile || currentState.view !== 'review') {
+      await db.deleteFile(SESSION_KEY);
       localStorage.removeItem(SESSION_KEY);
       return;
     }
 
-    if (currentState.pdfFile.size > MAX_SESSION_FILE_SIZE) {
-        console.warn(`PDF is too large (${currentState.pdfFile.size} bytes) to save session. Skipping.`);
-        localStorage.removeItem(SESSION_KEY); // Clear any old session
-        return;
-    }
-
-    const reader = new FileReader();
-    reader.readAsDataURL(currentState.pdfFile);
-    reader.onload = () => {
+    try {
+        await db.saveFile(SESSION_KEY, currentState.pdfFile);
         const sessionData = {
             fileData: {
-                dataUrl: reader.result as string,
                 name: currentState.pdfFile.name,
                 type: currentState.pdfFile.type,
             },
-            documentText: currentState.documentText,
             reviewResult: currentState.reviewResult,
         };
-        try {
-            localStorage.setItem(SESSION_KEY, JSON.stringify(sessionData));
-        } catch (e) {
-            console.error("Could not save session (storage may be full):", e);
-        }
-    };
-    reader.onerror = (error) => {
-        console.error("Could not convert file to save session:", error);
-    };
+        localStorage.setItem(SESSION_KEY, JSON.stringify(sessionData));
+    } catch (e) {
+        console.error("Could not save session:", e);
+        // Clean up if saving failed
+        await db.deleteFile(SESSION_KEY);
+        localStorage.removeItem(SESSION_KEY);
+    }
   }, []);
 
   useEffect(() => {
@@ -99,33 +87,23 @@ export default function App() {
     setSessionChecked(true);
   }, []);
 
-  const dataURLtoFile = (dataurl: string, filename: string, type: string): File => {
-    const arr = dataurl.split(',');
-    const mimeMatch = arr[0].match(/:(.*?);/);
-    const mime = (mimeMatch && mimeMatch[1]) || type;
-    const bstr = atob(arr[arr.length - 1]);
-    let n = bstr.length;
-    const u8arr = new Uint8Array(n);
-    while (n--) {
-      u8arr[n] = bstr.charCodeAt(n);
-    }
-    return new File([u8arr], filename, { type: mime });
-  };
-
-  const resumeSession = () => {
+  const resumeSession = async () => {
     if (!savedSessionData) return;
     
     try {
-        const file = dataURLtoFile(savedSessionData.fileData.dataUrl, savedSessionData.fileData.name, savedSessionData.fileData.type);
+        const file = await db.loadFile(SESSION_KEY);
+        if (!file) {
+            throw new Error("File not found in the local session database.");
+        }
 
         setPdfFile(file);
-        setDocumentText(savedSessionData.documentText);
         setReviewResult(savedSessionData.reviewResult);
         setView('review');
         setSavedSessionData(null); // Clear prompt after resuming
     } catch (e) {
         console.error("Failed to resume session:", e);
-        setError("Could not resume the previous session. It may be corrupted.");
+        setError("Could not resume the previous session. Please upload the file again.");
+        await db.deleteFile(SESSION_KEY);
         localStorage.removeItem(SESSION_KEY);
         setSavedSessionData(null);
     }
@@ -155,80 +133,63 @@ export default function App() {
 
   const handleDocumentSubmit = async (data: string | File) => {
     setIsProcessing(true);
-    setProcessingProgress(null);
     setError('');
-    setDocumentText('');
     setPdfFile(null);
     setReviewResult(null);
     triggerTempHighlight(null);
+    await db.deleteFile(SESSION_KEY);
     localStorage.removeItem(SESSION_KEY);
     setSavedSessionData(null);
 
     try {
+      // This app is now PDF-focused. The string path is unlikely.
       if (typeof data === 'string') {
-        // This app flow is now focused on PDFs, so this path is less likely.
-        setDocumentText(data);
+        setError("Text input is not supported. Please upload a PDF file.");
+        setView('input');
       } else {
-        // It's a file
+        // Text extraction is now deferred, so we just set the file and switch views.
+        // This makes the initial load feel instantaneous.
         setPdfFile(data);
-        // Extract text for the AI review
-        const arrayBuffer = await data.arrayBuffer();
-        const loadingTask = pdfjsLib.getDocument({ data: arrayBuffer });
-        const pdf = await loadingTask.promise;
-        
-        const totalPages = pdf.numPages;
-        setProcessingProgress({ current: 0, total: totalPages });
-
-        const pageNumbers = Array.from({ length: totalPages }, (_, i) => i + 1);
-        let pagesProcessed = 0;
-
-        const pageTextPromises = pageNumbers.map(pageNum =>
-            pdf.getPage(pageNum).then(page =>
-                page.getTextContent().then(textContent => {
-                    pagesProcessed++;
-                    setProcessingProgress({ current: pagesProcessed, total: totalPages });
-                    const pageText = textContent.items.map(item => ('str' in item ? item.str : '')).join(' ');
-                    return { pageNum, text: `--- PAGE ${pageNum} ---\n${pageText}\n\n` };
-                })
-            )
-        );
-
-        const extractedTexts = await Promise.all(pageTextPromises);
-        extractedTexts.sort((a, b) => a.pageNum - b.pageNum); // Ensure correct order
-        const fullText = extractedTexts.map(p => p.text).join('');
-        
-        setDocumentText(fullText);
+        setView('review');
       }
-      setView('review');
     } catch (err) {
       console.error("Error processing document:", err);
-      setError("Failed to process the document. The file might be corrupted or too large.");
-      setView('input'); // Go back to input screen on error
+      setError("Failed to load the document. The file might be corrupted.");
+      setView('input');
     } finally {
       setIsProcessing(false);
-      setProcessingProgress(null);
     }
   };
   
   useEffect(() => {
-    if (view === 'review' && (pdfFile || documentText)) {
+    if (view === 'review' && pdfFile) {
       saveSession();
     }
-  }, [view, pdfFile, documentText, reviewResult, saveSession]);
+  }, [view, pdfFile, reviewResult, saveSession]);
 
-  const handleReset = () => {
-    setDocumentText('');
+  const handleReset = async () => {
     setPdfFile(null);
     setError('');
     setView('input');
     triggerTempHighlight(null);
     setReviewResult(null);
     setSavedSessionData(null);
+    await db.deleteFile(SESSION_KEY);
     localStorage.removeItem(SESSION_KEY);
   };
 
   const handleReviewComplete = (result: ReviewResult) => {
     setReviewResult(result);
+  };
+  
+  const handleLoadError = async (message: string) => {
+    setError(message);
+    setPdfFile(null);
+    setView('input');
+    setReviewResult(null);
+    setSavedSessionData(null);
+    await db.deleteFile(SESSION_KEY);
+    localStorage.removeItem(SESSION_KEY);
   };
 
   if (view === 'review' && pdfFile) {
@@ -238,11 +199,11 @@ export default function App() {
             highlightText={highlightText} 
             targetPage={targetPage}
             onPageNavigated={() => setTargetPage(null)}
-            documentText={documentText}
             initialReviewResult={reviewResult}
             onReviewComplete={handleReviewComplete}
             setHighlightAndNavigate={handleHighlightAndNavigate}
             onReset={handleReset}
+            onLoadError={handleLoadError}
         />
     );
   }
@@ -268,7 +229,8 @@ export default function App() {
                 onSubmit={handleDocumentSubmit} 
                 savedSessionData={savedSessionData}
                 onResumeSession={resumeSession}
-                onClearSavedSession={() => {
+                onClearSavedSession={async () => {
+                    await db.deleteFile(SESSION_KEY);
                     localStorage.removeItem(SESSION_KEY);
                     setSavedSessionData(null);
                 }}
@@ -278,12 +240,7 @@ export default function App() {
           {isProcessing && (
              <div className="text-center p-8 h-full flex flex-col justify-center items-center">
                 <Loader />
-                <p className="mt-4 text-slate-600 font-semibold">Processing Document...</p>
-                {processingProgress && (
-                    <p className="mt-2 text-sm text-slate-500">
-                        Page {processingProgress.current} of {processingProgress.total}
-                    </p>
-                )}
+                <p className="mt-4 text-slate-600 font-semibold">Loading Document...</p>
              </div>
           )}
           {error && view === 'input' && (

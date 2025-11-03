@@ -1,37 +1,51 @@
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import type { MissedPoint, ReviewResult } from '../types';
 import { getReview, createLiveSession, generateSpeech } from '../services/geminiService';
 import { decode, decodeAudioData } from '../utils/audio';
 import { getAudioContext } from '../utils/audioContext';
-import { MicrophoneIcon, StopIcon, CheckCircleIcon, XCircleIcon, LightbulbIcon, AcademicCapIcon, SpeakerWaveIcon, XIcon } from './Icons';
+import { MicrophoneIcon, StopIcon, CheckCircleIcon, XCircleIcon, LightbulbIcon, AcademicCapIcon, SpeakerWaveIcon, XIcon, ChevronDownIcon } from './Icons';
 import { Loader } from './Loader';
 import { AudioVisualizer } from './AudioVisualizer';
 
 interface VoiceReviewerProps {
-  documentText: string;
+  pdfDoc: any;
+  numPages: number;
+  currentPage: number;
   setHighlightAndNavigate: (text: string | null, page: number | null) => void;
   onReviewComplete: (result: ReviewResult) => void;
   initialReviewResult: ReviewResult | null;
   onClose?: () => void;
 }
 
-type RecordingState = 'idle' | 'recording' | 'stopping' | 'processing' | 'complete' | 'error';
+type RecordingState = 'idle' | 'preparing' | 'recording' | 'stopping' | 'processing' | 'complete' | 'error';
 
-export function VoiceReviewer({ documentText, setHighlightAndNavigate, onReviewComplete, initialReviewResult, onClose }: VoiceReviewerProps) {
+export function VoiceReviewer({ pdfDoc, numPages, currentPage, setHighlightAndNavigate, onReviewComplete, initialReviewResult, onClose }: VoiceReviewerProps) {
   const [recordingState, setRecordingState] = useState<RecordingState>(initialReviewResult ? 'complete' : 'idle');
   const [transcription, setTranscription] = useState<string>('');
   const [reviewResult, setReviewResult] = useState<ReviewResult | null>(initialReviewResult);
   const [error, setError] = useState<string>('');
   const [analyserNode, setAnalyserNode] = useState<AnalyserNode | null>(null);
   
+  const [startPage, setStartPage] = useState(currentPage);
+  const [endPage, setEndPage] = useState(currentPage);
+  const [isContextSettingsOpen, setIsContextSettingsOpen] = useState(true);
+
   const liveSessionRef = useRef<any>(null);
   const finalTranscriptRef = useRef<string>('');
   const interimTranscriptRef = useRef<string>('');
+  const reviewContextTextRef = useRef<string>('');
 
   useEffect(() => {
     setReviewResult(initialReviewResult);
     setRecordingState(initialReviewResult ? 'complete' : 'idle');
   }, [initialReviewResult]);
+
+  useEffect(() => {
+    if (recordingState === 'idle' || recordingState === 'complete' || recordingState === 'error') {
+        setStartPage(currentPage);
+        setEndPage(currentPage);
+    }
+  }, [currentPage, recordingState]);
 
   const processTranscription = useCallback(async () => {
     const finalTranscription = (finalTranscriptRef.current + interimTranscriptRef.current).trim();
@@ -43,10 +57,16 @@ export function VoiceReviewer({ documentText, setHighlightAndNavigate, onReviewC
         setRecordingState('error');
         return;
     }
+    
+    if (!reviewContextTextRef.current) {
+        setError("The document context for the review was not loaded. Please try again.");
+        setRecordingState('error');
+        return;
+    }
 
     setRecordingState('processing');
     try {
-      const result = await getReview(documentText, finalTranscription);
+      const result = await getReview(reviewContextTextRef.current, finalTranscription);
       setReviewResult(result);
       onReviewComplete(result);
       setRecordingState('complete');
@@ -56,7 +76,7 @@ export function VoiceReviewer({ documentText, setHighlightAndNavigate, onReviewC
       setError(`Failed to get review from AI. ${errorMessage}`);
       setRecordingState('error');
     }
-  }, [documentText, onReviewComplete]);
+  }, [onReviewComplete]);
 
   const processTranscriptionRef = useRef(processTranscription);
   useEffect(() => {
@@ -94,9 +114,112 @@ export function VoiceReviewer({ documentText, setHighlightAndNavigate, onReviewC
     setError('');
     finalTranscriptRef.current = '';
     interimTranscriptRef.current = '';
+    reviewContextTextRef.current = '';
     setHighlightAndNavigate(null, null);
 
     if (recordingState !== 'idle' && recordingState !== 'error' && recordingState !== 'complete') return;
+
+    setRecordingState('preparing');
+    
+    if (!pdfDoc) {
+        setError('Document not loaded.');
+        setRecordingState('error');
+        return;
+    }
+
+    try {
+        let fullText = '';
+        const start = Math.max(1, Math.min(startPage, endPage));
+        const end = Math.min(numPages, Math.max(startPage, endPage));
+
+        for (let i = start; i <= end; i++) {
+            const page = await pdfDoc.getPage(i);
+            const textContent = await page.getTextContent();
+            const viewport = page.getViewport({ scale: 1 });
+            const pageWidth = viewport.width;
+
+            if (!textContent.items || textContent.items.length === 0) {
+                fullText += `--- PAGE ${i} ---\n[This page is empty or contains only images.]\n\n`;
+                continue;
+            }
+
+            const allItems = textContent.items.filter((item: any) => item.str?.trim());
+            
+            // Heuristic for multi-column detection.
+            const leftItems: any[] = [];
+            const rightItems: any[] = [];
+            const midPoint = pageWidth / 2;
+
+            allItems.forEach((item: any) => {
+                const x = item.transform[4];
+                if (x < midPoint) {
+                    leftItems.push(item);
+                } else {
+                    rightItems.push(item);
+                }
+            });
+
+            const hasSignificantContent = (items: any[]) => {
+                const totalChars = items.reduce((sum, item) => sum + item.str.length, 0);
+                return items.length > 5 && totalChars > 50;
+            };
+
+            const isMultiColumn = hasSignificantContent(leftItems) && hasSignificantContent(rightItems);
+
+            const processItems = (itemsToProcess: any[]) => {
+                itemsToProcess.sort((a: any, b: any) => {
+                    const y1 = a.transform[5];
+                    const y2 = b.transform[5];
+                    const x1 = a.transform[4];
+                    const x2 = b.transform[4];
+
+                    if (Math.abs(y1 - y2) > 5) {
+                        return y2 - y1;
+                    }
+                    return x1 - x2;
+                });
+
+                let text = '';
+                if (itemsToProcess.length > 0) {
+                    let lastY = itemsToProcess[0].transform[5];
+                    let lastHeight = itemsToProcess[0].height;
+
+                    for (const item of itemsToProcess) {
+                        const currentY = item.transform[5];
+                        if (Math.abs(currentY - lastY) > lastHeight * 1.5) {
+                            text += '\n';
+                        }
+                        text += item.str;
+                        if (!item.str.endsWith(' ')) {
+                            text += ' ';
+                        }
+                        lastY = currentY;
+                        lastHeight = item.height;
+                    }
+                }
+                return text;
+            };
+
+            let pageText = '';
+            if (isMultiColumn) {
+                const leftText = processItems(leftItems);
+                const rightText = processItems(rightItems);
+                pageText = leftText.trim() + '\n\n' + rightText.trim();
+            } else {
+                pageText = processItems(allItems);
+            }
+
+            const cleanedPageText = pageText.replace(/ +/g, ' ').replace(/ \n/g, '\n').trim();
+            fullText += `--- PAGE ${i} ---\n${cleanedPageText}\n\n`;
+        }
+        reviewContextTextRef.current = fullText;
+    } catch (e) {
+        console.error("Failed to load context for review:", e);
+        setError('Could not extract text from the specified pages.');
+        setRecordingState('error');
+        return;
+    }
+
 
     try {
       const permissionStatus = await navigator.permissions.query({ name: 'microphone' as PermissionName });
@@ -163,6 +286,8 @@ export function VoiceReviewer({ documentText, setHighlightAndNavigate, onReviewC
 
   const renderContent = () => {
     switch (recordingState) {
+      case 'preparing':
+        return <div className="text-center p-8"><Loader /><p className="mt-4 text-slate-600 font-semibold">Preparing review context...</p></div>;
       case 'processing':
         return <div className="text-center p-8"><Loader /><p className="mt-4 text-slate-600 font-semibold">Analyzing your review...</p></div>;
       case 'complete':
@@ -170,7 +295,7 @@ export function VoiceReviewer({ documentText, setHighlightAndNavigate, onReviewC
       case 'error':
         return <div className="text-center p-4 bg-red-50 border border-red-200 rounded-lg"><p className="text-red-700 font-semibold">Error</p><p className="text-red-600 mt-1">{error}</p></div>;
       case 'idle':
-        return <div className="text-center text-slate-500 py-8 px-4">Click the microphone to record your summary and get AI-powered feedback.</div>;
+        return <div className="text-center text-slate-500 py-8 px-4">Select a page range and click the microphone to record your summary.</div>;
       case 'recording':
       case 'stopping':
         return (
@@ -183,6 +308,8 @@ export function VoiceReviewer({ documentText, setHighlightAndNavigate, onReviewC
         return null;
     }
   };
+  
+  const isStartButtonDisabled = recordingState === 'processing' || recordingState === 'stopping' || recordingState === 'preparing' || recordingState === 'recording';
 
   return (
     <div className="bg-white h-full flex flex-col shadow-2xl">
@@ -191,141 +318,94 @@ export function VoiceReviewer({ documentText, setHighlightAndNavigate, onReviewC
             <div className="flex items-center justify-between">
                 <h2 className="text-xl font-bold text-slate-800">Comprehension Review</h2>
                 {onClose && (
-                    <button onClick={onClose} className="p-1 rounded-full hover:bg-slate-200" aria-label="Close review panel">
+                    <button onClick={onClose} className="p-1 rounded-full hover:bg-slate-200 lg:hidden" aria-label="Close review panel">
                         <XIcon className="w-6 h-6 text-slate-500" />
                     </button>
                 )}
             </div>
         </div>
-
-        {/* Controls */}
-        <div className="p-4 border-b border-gray-200 flex-shrink-0 flex flex-col items-center">
-             {recordingState !== 'recording' ? (
-                <button
-                    onClick={startRecording}
-                    disabled={recordingState === 'processing' || recordingState === 'stopping'}
-                    className="w-full flex items-center justify-center gap-3 px-6 py-3 bg-gradient-to-r from-blue-600 to-blue-500 text-white font-bold rounded-lg hover:from-blue-700 hover:to-blue-600 transition-all shadow-lg focus:outline-none focus:ring-4 focus:ring-blue-300 disabled:bg-slate-400 disabled:shadow-none disabled:bg-gradient-to-none"
-                >
-                    <MicrophoneIcon className="h-6 w-6" />
-                    <span>Start Recording Review</span>
-                </button>
-                ) : (
-                <button
-                    onClick={handleStopClick}
-                    className="w-full flex items-center justify-center gap-3 px-6 py-3 bg-red-600 text-white font-bold rounded-lg hover:bg-red-700 transition-all shadow-lg focus:outline-none focus:ring-4 focus:ring-red-300"
-                >
-                    <StopIcon className="h-6 w-6" />
-                    <span>Stop Recording</span>
-                </button>
-            )}
-        </div>
-
-        {/* Scrolling Content */}
+        
         <div className="flex-1 p-4 overflow-y-auto space-y-4">
-            {(recordingState === 'recording' || recordingState === 'stopping') && (
-                <div className="flex flex-col items-center justify-center p-4 bg-slate-50 rounded-lg">
-                    <AudioVisualizer analyserNode={analyserNode} />
-                    <p className="mt-3 text-sm text-slate-500">
-                        {recordingState === 'recording' ? 'Recording in progress...' : 'Finishing up...'}
-                    </p>
-                </div>
-            )}
-            {renderContent()}
+            {/* Context Settings */}
+            <div className="bg-slate-50 border border-slate-200 rounded-lg">
+                <button 
+                    onClick={() => setIsContextSettingsOpen(p => !p)}
+                    className="w-full text-left p-3 flex justify-between items-center hover:bg-slate-100"
+                    aria-expanded={isContextSettingsOpen}
+                    aria-controls="context-settings"
+                >
+                    <div className="flex items-center gap-3">
+                        <span className="p-1.5 bg-blue-100 text-blue-600 rounded-md"><AcademicCapIcon className="w-5 h-5" /></span>
+                        <div>
+                           <h3 className="font-semibold text-slate-800">Review Context</h3>
+                           <p className="text-xs text-slate-500">Pages {Math.min(startPage, endPage)} to {Math.max(startPage, endPage)}</p>
+                        </div>
+                    </div>
+                    <ChevronDownIcon className={`w-5 h-5 text-slate-500 transition-transform ${isContextSettingsOpen ? 'rotate-180' : ''}`} />
+                </button>
+                {isContextSettingsOpen && (
+                    <div id="context-settings" className="p-3 border-t border-slate-200">
+                        <label className="block text-sm font-medium text-slate-700 mb-2">Select page range for review:</label>
+                        <div className="flex items-center justify-center gap-2">
+                            <input type="number" value={startPage} onChange={e => setStartPage(parseInt(e.target.value, 10))} min={1} max={numPages} disabled={isStartButtonDisabled} className="w-16 p-1 border border-slate-300 rounded-md text-sm focus:ring-1 focus:ring-blue-500 disabled:bg-slate-100" aria-label="Start page" />
+                            <span className="text-sm font-medium text-slate-700">-</span>
+                            <input type="number" value={endPage} onChange={e => setEndPage(parseInt(e.target.value, 10))} min={1} max={numPages} disabled={isStartButtonDisabled} className="w-16 p-1 border border-slate-300 rounded-md text-sm focus:ring-1 focus:ring-blue-500 disabled:bg-slate-100" aria-label="End page" />
+                        </div>
+                    </div>
+                )}
+            </div>
+
+            <div className="min-h-[150px]">
+                {renderContent()}
+            </div>
+        </div>
+        
+        <div className="p-4 border-t border-gray-200 flex-shrink-0">
+            <div className="flex flex-col items-center justify-center gap-4">
+                {analyserNode && <AudioVisualizer analyserNode={analyserNode} />}
+
+                {recordingState === 'recording' ? (
+                     <button onClick={handleStopClick} className="w-16 h-16 bg-red-600 text-white rounded-full flex items-center justify-center shadow-lg animate-pulse" aria-label="Stop recording">
+                        <StopIcon className="w-8 h-8" />
+                    </button>
+                ) : (
+                    <button onClick={startRecording} disabled={isStartButtonDisabled} className="w-16 h-16 bg-blue-600 text-white rounded-full flex items-center justify-center shadow-lg disabled:bg-slate-400 disabled:cursor-not-allowed" aria-label={reviewResult ? 'Record again' : 'Start recording'}>
+                        <MicrophoneIcon className="w-8 h-8" />
+                    </button>
+                )}
+                 <p className="text-sm text-slate-500 h-5 text-center">
+                    {recordingState === 'recording' && 'Recording...'}
+                    {recordingState === 'stopping' && 'Stopping...'}
+                 </p>
+            </div>
         </div>
     </div>
   );
 }
 
-const ScoreCircle = ({ score }: { score: number }) => {
-    const size = 160;
-    const strokeWidth = 12;
-    const center = size / 2;
-    const radius = center - strokeWidth;
-    const circumference = 2 * Math.PI * radius;
-  
-    const [offset, setOffset] = useState(circumference);
-  
-    useEffect(() => {
-        const progressOffset = ((100 - score) / 100) * circumference;
-        // Delay start of animation slightly for visual effect
-        const timer = setTimeout(() => setOffset(progressOffset), 100);
-        return () => clearTimeout(timer);
-    }, [score, circumference]);
-    
-    const scoreColorClass = score >= 80 ? 'text-green-500' : score >= 50 ? 'text-yellow-500' : 'text-red-500';
-
-    return (
-        <div className="relative" style={{ width: size, height: size }}>
-            <svg className="w-full h-full" viewBox={`0 0 ${size} ${size}`}>
-                <circle
-                    className="text-slate-200"
-                    stroke="currentColor"
-                    strokeWidth={strokeWidth}
-                    fill="transparent"
-                    r={radius}
-                    cx={center}
-                    cy={center}
-                />
-                <circle
-                    className={`${scoreColorClass} transition-all duration-1000 ease-out`}
-                    stroke="currentColor"
-                    strokeWidth={strokeWidth}
-                    strokeLinecap="round"
-                    fill="transparent"
-                    r={radius}
-                    cx={center}
-                    cy={center}
-                    strokeDasharray={circumference}
-                    strokeDashoffset={offset}
-                    transform={`rotate(-90 ${center} ${center})`}
-                />
-            </svg>
-            <div className="absolute inset-0 flex flex-col items-center justify-center">
-                 <span className={`text-5xl font-bold ${scoreColorClass}`}>{score}</span>
-                 <span className="text-sm font-medium text-slate-500">/ 100</span>
-            </div>
-        </div>
-    );
-};
-
-interface ReviewDisplayProps {
-    result: ReviewResult;
-    setHighlightAndNavigate: (text: string | null, page: number | null) => void;
-    onRecordAgain: () => void;
-}
-
-const ReviewDisplay = ({ result, setHighlightAndNavigate, onRecordAgain }: ReviewDisplayProps) => {
-    const [audioState, setAudioState] = useState<{ loadingIndex: number | null; playingIndex: number | null }>({ loadingIndex: null, playingIndex: null });
+function ReviewDisplay({ result, setHighlightAndNavigate, onRecordAgain }: { result: ReviewResult; setHighlightAndNavigate: (text: string, page: number) => void; onRecordAgain: () => void; }) {
+    const [playingPoint, setPlayingPoint] = useState<MissedPoint | null>(null);
     const audioSourceRef = useRef<AudioBufferSourceNode | null>(null);
 
-    const stopAudio = useCallback(() => {
-        if (audioSourceRef.current) {
-            try { 
-                audioSourceRef.current.onended = null;
-                audioSourceRef.current.stop(); 
-            } catch (e) { /* ignore */ }
-            audioSourceRef.current = null;
-        }
-        setAudioState({ loadingIndex: null, playingIndex: null });
-    }, []);
-
-    // Cleanup audio on component unmount
-    useEffect(() => {
-      return () => {
-        stopAudio();
-      };
-    }, [stopAudio]);
-
-    const playAudio = async (base64Audio: string, onEnded: () => void) => {
-        const context = getAudioContext();
-        try {
-            const decoded = decode(base64Audio);
-            const audioBuffer = await decodeAudioData(decoded, context, 24000, 1);
-
+    const playSuggestion = async (point: MissedPoint) => {
+        if (playingPoint === point) {
             if (audioSourceRef.current) {
-                audioSourceRef.current.onended = null;
                 audioSourceRef.current.stop();
+                audioSourceRef.current = null;
             }
+            setPlayingPoint(null);
+            return;
+        }
+
+        setPlayingPoint(point);
+        const textToSpeak = `Here is a point you missed: ${point.point}. For example, the text says, "${point.example}". To improve, you could try this: ${point.suggestion}`;
+        const audioData = await generateSpeech(textToSpeak);
+        if (audioData) {
+            const context = getAudioContext();
+            const decoded = decode(audioData);
+            const audioBuffer = await decodeAudioData(decoded, context, 24000, 1);
+            
+            if (audioSourceRef.current) audioSourceRef.current.stop();
 
             const source = context.createBufferSource();
             audioSourceRef.current = source;
@@ -333,131 +413,52 @@ const ReviewDisplay = ({ result, setHighlightAndNavigate, onRecordAgain }: Revie
             source.connect(context.destination);
             source.start();
             source.onended = () => {
-                if (audioSourceRef.current === source) {
-                    audioSourceRef.current = null;
-                    onEnded();
+                if(audioSourceRef.current === source) {
+                   setPlayingPoint(null);
+                   audioSourceRef.current = null;
                 }
             };
-        } catch (e) {
-            console.error("Failed to play audio:", e);
-            onEnded(); // Ensure state is reset even on error
+        } else {
+            setPlayingPoint(null); // Failed to generate audio
         }
     };
 
-    const handlePlaySuggestion = async (text: string, index: number) => {
-        if (audioState.playingIndex === index) {
-            stopAudio();
-            return;
-        }
-        stopAudio();
-        setAudioState({ loadingIndex: index, playingIndex: null });
-        try {
-            const audioData = await generateSpeech(text);
-            if (audioData) {
-                setAudioState({ loadingIndex: null, playingIndex: index });
-                await playAudio(audioData, () => {
-                    setAudioState({ loadingIndex: null, playingIndex: null });
-                });
-            } else {
-                throw new Error("Audio data was null.");
-            }
-        } catch (e) {
-            console.error("Error generating or playing speech:", e);
-            setAudioState({ loadingIndex: null, playingIndex: null });
-        }
-    };
+    const scoreColor = result.score >= 80 ? 'text-green-600' : result.score >= 50 ? 'text-yellow-600' : 'text-red-600';
+    const scoreBg = result.score >= 80 ? 'bg-green-100' : result.score >= 50 ? 'bg-yellow-100' : 'bg-red-100';
 
     return (
-        <div className="space-y-6 animate-fade-in">
-            {/* Score Section */}
-            <div className="flex flex-col items-center p-6 bg-slate-50 rounded-2xl border border-slate-200">
-                <ScoreCircle score={result.score} />
-                <p className="mt-4 text-center text-slate-600 font-medium max-w-md">{result.scoreRationale}</p>
+        <div className="space-y-4">
+            <div className={`p-3 rounded-lg ${scoreBg}`}>
+                <p className="text-sm font-semibold text-slate-800">Comprehension Score</p>
+                <p className={`text-4xl font-extrabold ${scoreColor}`}>{result.score}<span className="text-xl">%</span></p>
+                <p className="text-sm text-slate-600 mt-1">{result.scoreRationale}</p>
             </div>
 
-            {/* Mentioned Points Section */}
-            <div className="p-4 bg-green-50 rounded-lg border border-green-200">
-                <div className="flex items-center gap-3">
-                    <CheckCircleIcon className="w-7 h-7 text-green-500 flex-shrink-0" />
-                    <h3 className="text-lg font-bold text-green-800">What You Nailed</h3>
-                </div>
-                <p className="mt-2 text-green-900/90 pl-10">{result.summaryOfMentionedPoints}</p>
-            </div>
-
-            {/* Missed Points Section */}
             <div>
-                <div className="flex items-center gap-3 mb-4">
-                    <XCircleIcon className="w-7 h-7 text-red-500 flex-shrink-0" />
-                    <h3 className="text-lg font-bold text-red-800">Areas for Improvement</h3>
-                </div>
-                {result.reviewOfMissedPoints.length > 0 ? (
-                    <div className="space-y-4">
-                        {result.reviewOfMissedPoints.map((point, index) => (
-                            <div key={index} className="bg-white border border-slate-200 p-4 rounded-lg shadow-sm">
-                                <p className="font-bold text-slate-800">{index + 1}. {point.point}</p>
-                                
-                                <button 
-                                    onClick={() => setHighlightAndNavigate(point.example, point.pageNumber)}
-                                    className="my-2 block w-full text-left p-3 bg-slate-50 border-l-4 border-slate-300 rounded-r-md hover:bg-slate-100 hover:border-slate-400 transition-colors"
-                                >
-                                    <span className="font-semibold text-slate-600">From the text (Page {point.pageNumber}):</span>
-                                    <blockquote className="mt-1 text-slate-700 italic">"{point.example}"</blockquote>
-                                </button>
-
-                                <div className="mt-3 p-3 bg-blue-50/70 border-l-4 border-blue-400 rounded-r-md">
-                                    <div className="flex items-start gap-3">
-                                        <LightbulbIcon className="w-5 h-5 text-blue-600 flex-shrink-0 mt-0.5" />
-                                        <div className="flex-grow">
-                                            <h4 className="font-semibold text-blue-800">Suggestion</h4>
-                                            <p className="text-blue-900/90">{point.suggestion}</p>
-                                        </div>
-                                        <button
-                                            onClick={() => handlePlaySuggestion(point.suggestion, index)}
-                                            className="p-2 rounded-full hover:bg-blue-200 text-slate-500 hover:text-blue-600 transition-colors flex-shrink-0"
-                                            aria-label={`Listen to suggestion for ${point.point}`}
-                                        >
-                                            {audioState.loadingIndex === index ? (
-                                                <div className="w-5 h-5 border-2 border-t-blue-500 border-slate-200 rounded-full animate-spin"></div>
-                                            ) : audioState.playingIndex === index ? (
-                                                <SpeakerWaveIcon className="w-5 h-5 text-blue-600 animate-pulse" />
-                                            ) : (
-                                                <SpeakerWaveIcon className="w-5 h-5" />
-                                            )}
-                                        </button>
-                                    </div>
-                                </div>
-                                
-                                <div className="mt-3">
-                                    <div className="flex items-center gap-2">
-                                        <AcademicCapIcon className="w-5 h-5 text-slate-500" />
-                                        <h4 className="font-semibold text-slate-600">Related Concepts</h4>
-                                    </div>
-                                    <div className="mt-2 flex flex-wrap gap-2">
-                                        {point.relatedConcepts.map(concept => (
-                                            <span key={concept} className="px-2.5 py-1 bg-slate-200 text-slate-700 text-xs font-medium rounded-full">
-                                                {concept}
-                                            </span>
-                                        ))}
-                                    </div>
-                                </div>
-                            </div>
-                        ))}
-                    </div>
-                ) : (
-                    <p className="text-slate-600 p-4 bg-slate-50 rounded-md">No specific missed points found. Great job!</p>
-                )}
+                <h3 className="font-semibold text-slate-800 flex items-center gap-2 mb-2"><CheckCircleIcon className="w-5 h-5 text-green-500" />What you got right</h3>
+                <p className="text-sm text-slate-600 bg-slate-50 p-2 rounded-md">{result.summaryOfMentionedPoints}</p>
             </div>
 
-             {/* Record Again Button */}
-            <div className="pt-4 border-t border-slate-200">
-                <button
-                    onClick={onRecordAgain}
-                    className="w-full flex items-center justify-center gap-3 px-6 py-3 bg-slate-700 text-white font-bold rounded-lg hover:bg-slate-800 transition-all shadow-lg focus:outline-none focus:ring-4 focus:ring-slate-300"
-                >
-                    <MicrophoneIcon className="h-6 w-6" />
-                    <span>Record a New Review</span>
-                </button>
+            <div>
+                <h3 className="font-semibold text-slate-800 flex items-center gap-2 mb-2"><LightbulbIcon className="w-5 h-5 text-yellow-500" />Areas for improvement</h3>
+                <div className="space-y-3">
+                    {result.reviewOfMissedPoints.map((point, index) => (
+                        <div key={index} className="bg-slate-50 border border-slate-200 p-3 rounded-lg">
+                            <div className="flex justify-between items-start">
+                                <p className="font-semibold text-slate-800 text-sm flex-1">{point.point}</p>
+                                <button onClick={() => playSuggestion(point)} className="ml-2 p-1 text-slate-500 hover:bg-slate-200 rounded-full" aria-label="Read suggestion aloud">
+                                    <SpeakerWaveIcon className={`w-5 h-5 ${playingPoint === point ? 'text-blue-500 animate-pulse' : ''}`} />
+                                </button>
+                            </div>
+                            <blockquote className="text-xs text-slate-600 mt-1 border-l-2 border-blue-300 pl-2 italic">"{point.example}"</blockquote>
+                            <button onClick={() => setHighlightAndNavigate(point.example, point.pageNumber)} className="text-xs text-blue-600 hover:underline mt-1">
+                                (p. {point.pageNumber}) Go to text
+                            </button>
+                            <p className="text-sm text-slate-700 mt-2"><span className="font-semibold">Suggestion:</span> {point.suggestion}</p>
+                        </div>
+                    ))}
+                </div>
             </div>
         </div>
     );
-};
+}
