@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { Chat } from '@google/genai';
+import { Chat, Part } from '@google/genai';
 import { startPageChatSession, generateSpeech, createLiveSession } from '../services/geminiService';
 import { decode, decodeAudioData } from '../utils/audio';
 import { getAudioContext } from '../utils/audioContext';
@@ -20,6 +20,49 @@ type ChatMessage = {
 };
 
 type ChatState = 'idle' | 'loading_context' | 'context_loaded' | 'listening' | 'stopping' | 'processing_speech' | 'processing_model' | 'speaking';
+
+// Renders model responses with simple formatting for lists and bold text.
+const FormattedMessage = ({ text }: { text: string }) => {
+    const lines = text.split('\n');
+
+    return (
+        <div className="text-sm break-words space-y-2">
+            {lines.map((line, index) => {
+                if (!line.trim()) return null;
+
+                // Handle list items: "* Item"
+                if (line.trim().startsWith('* ')) {
+                    const content = line.trim().substring(2);
+                    const parts = content.split(/(\*\*.*?\*\*)/g).filter(Boolean);
+                    return (
+                        <div key={index} className="flex items-start">
+                            <span className="mr-2 mt-2 block w-1.5 h-1.5 rounded-full bg-slate-500 flex-shrink-0"></span>
+                            <p>
+                                {parts.map((part, partIndex) => 
+                                    part.startsWith('**') && part.endsWith('**')
+                                        ? <strong key={partIndex}>{part.slice(2, -2)}</strong>
+                                        : <span key={partIndex}>{part}</span>
+                                )}
+                            </p>
+                        </div>
+                    );
+                }
+                
+                // Handle regular paragraph lines with bolding: "**Bolded** text"
+                const parts = line.split(/(\*\*.*?\*\*)/g).filter(Boolean);
+                return (
+                    <p key={index}>
+                        {parts.map((part, partIndex) => 
+                            part.startsWith('**') && part.endsWith('**')
+                                ? <strong key={partIndex}>{part.slice(2, -2)}</strong>
+                                : <span key={partIndex}>{part}</span>
+                        )}
+                    </p>
+                );
+            })}
+        </div>
+    );
+};
 
 export function PageChat({ pdfDoc, numPages, currentPage, isOpen, onClose }: PageChatProps) {
   const [startPage, setStartPage] = useState(currentPage);
@@ -112,9 +155,9 @@ export function PageChat({ pdfDoc, numPages, currentPage, isOpen, onClose }: Pag
     if (liveSessionRef.current) {
         liveSessionRef.current.session?.close();
         liveSessionRef.current.stream?.getTracks().forEach((track: MediaStreamTrack) => track.stop());
-        if (liveSessionRef.current.workletNode) {
-            liveSessionRef.current.workletNode.port.onmessage = null;
-            liveSessionRef.current.workletNode.disconnect();
+        if (liveSessionRef.current.scriptProcessor) {
+            liveSessionRef.current.scriptProcessor.onaudioprocess = null;
+            liveSessionRef.current.scriptProcessor.disconnect();
         }
         liveSessionRef.current.source?.disconnect();
         if (liveSessionRef.current.context?.state !== 'closed') {
@@ -140,6 +183,8 @@ export function PageChat({ pdfDoc, numPages, currentPage, isOpen, onClose }: Pag
     const start = Math.max(1, Math.min(startPage, endPage));
     const end = Math.min(numPages, Math.max(startPage, endPage));
     
+    setChatHistory([{ role: 'system', text: `Loading content for pages ${start}-${end}...` }]);
+
     if (start > end) {
         setError('Start page cannot be after end page.');
         setChatState('idle');
@@ -147,104 +192,128 @@ export function PageChat({ pdfDoc, numPages, currentPage, isOpen, onClose }: Pag
     }
     
     try {
-        let fullText = '';
-        let hasTextContent = false;
+        const contextParts: Part[] = [];
+        let hasContent = false;
 
         for (let i = start; i <= end; i++) {
             const page = await pdfDoc.getPage(i);
             const textContent = await page.getTextContent();
-            const viewport = page.getViewport({ scale: 1 });
-            const pageWidth = viewport.width;
-
-            if (!textContent.items || textContent.items.length === 0) {
-                fullText += `--- PAGE ${i} ---\n[This page is empty or contains only images.]\n\n`;
-                continue;
-            }
-
-            hasTextContent = true; // Found a page with text items
-
-            const allItems = textContent.items.filter((item: any) => item.str?.trim());
             
-            const leftItems: any[] = [];
-            const rightItems: any[] = [];
-            const midPoint = pageWidth / 2;
+            contextParts.push({ text: `\n\n--- PAGE ${i} ---\n` });
 
-            allItems.forEach((item: any) => {
-                if (item.transform[4] < midPoint) {
-                    leftItems.push(item);
-                } else {
-                    rightItems.push(item);
-                }
-            });
+            if (textContent.items && textContent.items.length > 0) {
+                const viewport = page.getViewport({ scale: 1 });
+                const pageWidth = viewport.width;
 
-            const hasSignificantContent = (items: any[]) => {
-                const totalChars = items.reduce((sum, item) => sum + item.str.length, 0);
-                return items.length > 5 && totalChars > 50;
-            };
+                const allItems = textContent.items.filter((item: any) => item.str?.trim());
+            
+                const leftItems: any[] = [];
+                const rightItems: any[] = [];
+                const midPoint = pageWidth / 2;
 
-            const isMultiColumn = hasSignificantContent(leftItems) && hasSignificantContent(rightItems);
-
-            const processItems = (itemsToProcess: any[]) => {
-                itemsToProcess.sort((a: any, b: any) => {
-                    const y1 = a.transform[5];
-                    const y2 = b.transform[5];
-                    const x1 = a.transform[4];
-                    const x2 = b.transform[4];
-                    if (Math.abs(y1 - y2) > 5) return y2 - y1;
-                    return x1 - x2;
+                allItems.forEach((item: any) => {
+                    if (item.transform[4] < midPoint) {
+                        leftItems.push(item);
+                    } else {
+                        rightItems.push(item);
+                    }
                 });
 
-                let text = '';
-                if (itemsToProcess.length > 0) {
-                    let lastY = itemsToProcess[0].transform[5];
-                    let lastHeight = itemsToProcess[0].height;
-                    for (const item of itemsToProcess) {
-                        const currentY = item.transform[5];
-                        if (Math.abs(currentY - lastY) > lastHeight * 1.5) {
-                            text += '\n';
+                const hasSignificantContent = (items: any[]) => {
+                    const totalChars = items.reduce((sum, item) => sum + item.str.length, 0);
+                    return items.length > 5 && totalChars > 50;
+                };
+
+                const isMultiColumn = hasSignificantContent(leftItems) && hasSignificantContent(rightItems);
+
+                const processItems = (itemsToProcess: any[]) => {
+                    itemsToProcess.sort((a: any, b: any) => {
+                        const y1 = a.transform[5];
+                        const y2 = b.transform[5];
+                        const x1 = a.transform[4];
+                        const x2 = b.transform[4];
+                        if (Math.abs(y1 - y2) > 5) return y2 - y1;
+                        return x1 - x2;
+                    });
+
+                    let text = '';
+                    if (itemsToProcess.length > 0) {
+                        let lastY = itemsToProcess[0].transform[5];
+                        let lastHeight = itemsToProcess[0].height;
+                        for (const item of itemsToProcess) {
+                            const currentY = item.transform[5];
+                            if (Math.abs(currentY - lastY) > lastHeight * 1.5) {
+                                text += '\n';
+                            }
+                            text += item.str;
+                            if (!item.str.endsWith(' ')) text += ' ';
+                            lastY = currentY;
+                            lastHeight = item.height;
                         }
-                        text += item.str;
-                        if (!item.str.endsWith(' ')) text += ' ';
-                        lastY = currentY;
-                        lastHeight = item.height;
                     }
+                    return text;
+                };
+
+                let pageText = '';
+                if (isMultiColumn) {
+                    const leftText = processItems(leftItems);
+                    const rightText = processItems(rightItems);
+                    pageText = leftText.trim() + '\n\n' + rightText.trim();
+                } else {
+                    pageText = processItems(allItems);
                 }
-                return text;
-            };
 
-            let pageText = '';
-            if (isMultiColumn) {
-                const leftText = processItems(leftItems);
-                const rightText = processItems(rightItems);
-                pageText = leftText.trim() + '\n\n' + rightText.trim();
+                const cleanedPageText = pageText.replace(/ +/g, ' ').replace(/ \n/g, '\n').trim();
+                if (cleanedPageText) {
+                    contextParts.push({ text: cleanedPageText });
+                    hasContent = true;
+                }
             } else {
-                pageText = processItems(allItems);
-            }
+                // If no text, render page as image for OCR
+                const viewport = page.getViewport({ scale: 1.5 }); // Higher scale for better OCR
+                const canvas = document.createElement('canvas');
+                const context = canvas.getContext('2d');
+                if (!context) continue;
 
-            const cleanedPageText = pageText.replace(/ +/g, ' ').replace(/ \n/g, '\n').trim();
-            fullText += `--- PAGE ${i} ---\n${cleanedPageText}\n\n`;
+                canvas.height = viewport.height;
+                canvas.width = viewport.width;
+
+                await page.render({ canvasContext: context, viewport }).promise;
+
+                const dataUrl = canvas.toDataURL('image/jpeg');
+                const base64Data = dataUrl.split(',')[1];
+                
+                contextParts.push({
+                    inlineData: {
+                        mimeType: 'image/jpeg',
+                        data: base64Data,
+                    }
+                });
+                hasContent = true;
+            }
         }
       
-      if (!hasTextContent) {
+      if (!hasContent) {
         const pageRange = start === end ? `page ${start}` : `pages ${start}-${end}`;
         setChatHistory([{ 
             role: 'model',
-            text: `It looks like ${pageRange} contain only images or diagrams. I can only read text, so I can't explain the content here. Please select a different page or range with text to chat about it!` 
+            text: `It looks like ${pageRange} is empty. I can't find any text or images to analyze. Please select a different page or range with content.` 
         }]);
         setChatState('context_loaded');
         chatSessionRef.current = null;
         return;
       }
 
-      chatSessionRef.current = startPageChatSession(fullText);
+      chatSessionRef.current = startPageChatSession(contextParts);
       setChatState('context_loaded');
       setChatHistory([{ role: 'system', text: `AI context loaded for pages ${start}-${end}. Ask me anything about this section!` }]);
     } catch (e) {
       console.error("Failed to load context:", e);
-      setError('Could not extract text from the specified pages.');
+      setError('Could not extract content from the specified pages.');
       setChatState('idle');
     }
   }, [pdfDoc, startPage, endPage, numPages, resetChat]);
+
 
   // Auto-load context when the component becomes visible
   useEffect(() => {
@@ -468,7 +537,10 @@ export function PageChat({ pdfDoc, numPages, currentPage, isOpen, onClose }: Pag
                        msg.role === 'user' ? 'bg-blue-600 text-white' : 
                        msg.role === 'model' ? 'bg-slate-100 text-slate-800' : 'bg-transparent text-slate-500 text-sm italic text-center w-full'
                    }`}>
-                       <p className="text-sm break-words">{msg.text}</p>
+                        {msg.role === 'model' 
+                            ? <FormattedMessage text={msg.text} />
+                            : <p className="text-sm break-words">{msg.text}</p>
+                        }
                    </div>
                 </div>
             ))}

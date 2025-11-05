@@ -1,4 +1,4 @@
-import { GoogleGenAI, Type, Modality, LiveServerMessage, Chat } from "@google/genai";
+import { GoogleGenAI, Type, Modality, LiveServerMessage, Chat, Part } from "@google/genai";
 import type { ReviewResult } from '../types';
 import { encode } from '../utils/audio';
 
@@ -58,34 +58,38 @@ const reviewSchema = {
     required: ["score", "scoreRationale", "summaryOfMentionedPoints", "reviewOfMissedPoints"]
 };
 
-export async function getReview(documentText: string, userSummary: string): Promise<ReviewResult> {
-  const prompt = `
-    Here is the original document content, which includes page markers (e.g., '--- PAGE 1 ---'):
-    ---
-    ${documentText}
-    ---
+export async function getReview(documentParts: Part[], userSummary: string): Promise<ReviewResult> {
+  const partsForModel: Part[] = [
+    { text: `
+      Here is the original document content, which includes page markers and may contain images with text. Please analyze all of it.
+      --- DOCUMENT CONTENT START ---` 
+    },
+    ...documentParts,
+    { text: `--- DOCUMENT CONTENT END ---
 
-    Here is the user's spoken summary of the document:
-    ---
-    ${userSummary}
-    ---
+      Here is the user's spoken summary of the document:
+      ---
+      ${userSummary}
+      ---
 
-    Please perform the following tasks and provide the output in the requested JSON format:
-    1.  Compare the user's summary against the original document.
-    2.  Calculate a comprehension score from 0 to 100, where 100 represents perfect comprehension and recall of all key points. The score should reflect how much of the original text's core information is present in the user's summary.
-    3.  Provide a short, one-sentence rationale explaining the score. For example: "Your score reflects a good grasp of the main topics, but you missed several key definitions."
-    4.  Provide a brief, positive summary of the key points the user correctly mentioned.
-    5.  Identify the key points or important details from the original document that the user missed in their summary. It is very important that you identify several missed points. Even if the summary is good, there are always nuances or details that can be highlighted for improvement. Be critical in your analysis. For each missed point, provide:
-        a. The missed point itself.
-        b. A specific, brief quote or example from the original document that directly illustrates it.
-        c. The page number where this quote appears, referencing the '--- PAGE X ---' markers in the text.
-        d. An actionable suggestion to help the user improve. This could be a recommendation to review a specific section, a related concept to study, or a question to consider that would lead them to the correct understanding.
-        e. A list of 2-3 'relatedConcepts'. These should be keywords or topics related to the missed point that the user can research for deeper understanding.
-  `;
+      Please perform the following tasks and provide the output in the requested JSON format:
+      1.  Compare the user's summary against the original document.
+      2.  Calculate a comprehension score from 0 to 100, where 100 represents perfect comprehension and recall of all key points. The score should reflect how much of the original text's core information is present in the user's summary.
+      3.  Provide a short, one-sentence rationale explaining the score. For example: "Your score reflects a good grasp of the main topics, but you missed several key definitions."
+      4.  Provide a brief, positive summary of the key points the user correctly mentioned.
+      5.  Identify the key points or important details from the original document that the user missed in their summary. It is very important that you identify several missed points. Even if the summary is good, there are always nuances or details that can be highlighted for improvement. Be critical in your analysis. For each missed point, provide:
+          a. The missed point itself.
+          b. A specific, brief quote or example from the original document that directly illustrates it.
+          c. The page number where this quote appears, referencing the '--- PAGE X ---' markers in the text.
+          d. An actionable suggestion to help the user improve. This could be a recommendation to review a specific section, a related concept to study, or a question to consider that would lead them to the correct understanding.
+          e. A list of 2-3 'relatedConcepts'. These should be keywords or topics related to the missed point that the user can research for deeper understanding.`
+    }
+  ];
+
   try {
     const response = await ai.models.generateContent({
         model: "gemini-2.5-flash",
-        contents: prompt,
+        contents: partsForModel,
         config: {
         responseMimeType: "application/json",
         responseSchema: reviewSchema,
@@ -104,15 +108,26 @@ export async function getReview(documentText: string, userSummary: string): Prom
   }
 }
 
-export function startPageChatSession(contextText: string): Chat {
-    const systemInstruction = `You are a helpful study assistant. Your knowledge is strictly limited to the following text provided by the user. Answer the user's questions based only on this provided context. If the answer cannot be found in the text, clearly state that you do not have that information. Do not use any outside knowledge.
-
-    --- DOCUMENT CONTEXT ---
-    ${contextText}
-    --- END OF CONTEXT ---`;
+export function startPageChatSession(contextParts: Part[]): Chat {
+    const systemInstruction = `You are a helpful study assistant. Your knowledge is strictly limited to the context provided in the first user message. This context may include text and images. Base your answers ONLY on this provided context. If the answer isn't in the context, state that you don't have the information. Do not use outside knowledge. Please format your answers for clear readability. Use standard Markdown for lists (using asterisks) and bolding (using double asterisks). Avoid using LaTeX or other complex syntax. For example, instead of '$\\ge$', use '>=' or 'greater than or equal to'.`;
     
+    const history = [
+        {
+            role: 'user' as const,
+            parts: [
+                { text: "Please analyze the following document content, which includes page markers and may contain images with text. This is the sole source of information for my questions." }, 
+                ...contextParts
+            ]
+        },
+        {
+            role: 'model' as const,
+            parts: [{text: "I understand. I have loaded the document content. I am ready to answer your questions based only on this material."}]
+        }
+    ];
+
     return ai.chats.create({
       model: 'gemini-2.5-flash',
+      history: history,
       config: {
         systemInstruction,
       },
@@ -142,27 +157,6 @@ export async function generateSpeech(text: string): Promise<string | null> {
     }
 }
 
-const workletCode = `
-class AudioProcessor extends AudioWorkletProcessor {
-  process(inputs) {
-    const channelData = inputs[0][0];
-    if (channelData) {
-      // Convert Float32Array to Int16Array and post back.
-      const int16 = new Int16Array(channelData.length);
-      for (let i = 0; i < channelData.length; i++) {
-        // Clamp the values to the Int16 range.
-        int16[i] = Math.max(-32768, Math.min(32767, channelData[i] * 32768));
-      }
-      this.port.postMessage(int16);
-    }
-    return true; // Keep processor alive.
-  }
-}
-registerProcessor('audio-processor', AudioProcessor);
-`;
-
-let workletURL: string | undefined;
-
 export async function createLiveSession({ onTranscriptionUpdate, onTurnComplete, onError, onClose }: {
     onTranscriptionUpdate: (text: string) => void;
     onTurnComplete: () => void;
@@ -173,21 +167,27 @@ export async function createLiveSession({ onTranscriptionUpdate, onTurnComplete,
     const context = new (window.AudioContext || (window as any).webkitAudioContext)({ sampleRate: 16000 });
     const source = context.createMediaStreamSource(stream);
 
-    if (!workletURL) {
-      const blob = new Blob([workletCode], { type: 'application/javascript' });
-      workletURL = URL.createObjectURL(blob);
-    }
-    
-    await context.audioWorklet.addModule(workletURL);
-    const workletNode = new AudioWorkletNode(context, 'audio-processor');
+    // Using ScriptProcessorNode for broader compatibility and simpler buffer management.
+    // Buffer size of 4096 is a good standard for streaming audio.
+    const scriptProcessor = context.createScriptProcessor(4096, 1, 1);
     
     const sessionPromise = ai.live.connect({
         model: 'gemini-2.5-flash-native-audio-preview-09-2025',
         callbacks: {
             onopen: () => {
-                workletNode.port.onmessage = (event: MessageEvent<Int16Array>) => {
+                scriptProcessor.onaudioprocess = (audioProcessingEvent: AudioProcessingEvent) => {
+                    const inputData = audioProcessingEvent.inputBuffer.getChannelData(0);
+                    
+                    // Convert Float32Array to Int16Array
+                    const l = inputData.length;
+                    const int16 = new Int16Array(l);
+                    for (let i = 0; i < l; i++) {
+                        // Clamp the value to the [-1, 1] range and scale to Int16.
+                        int16[i] = Math.max(-1, Math.min(1, inputData[i])) * 32767;
+                    }
+
                     const pcmBlob = {
-                        data: encode(new Uint8Array(event.data.buffer)),
+                        data: encode(new Uint8Array(int16.buffer)),
                         mimeType: 'audio/pcm;rate=16000',
                     };
                     
@@ -195,8 +195,8 @@ export async function createLiveSession({ onTranscriptionUpdate, onTurnComplete,
                         session.sendRealtimeInput({ media: pcmBlob });
                     }).catch(onError);
                 };
-                source.connect(workletNode);
-                workletNode.connect(context.destination);
+                source.connect(scriptProcessor);
+                scriptProcessor.connect(context.destination);
             },
             onmessage: (message: LiveServerMessage) => {
                 if (message.serverContent?.inputTranscription?.text) {
@@ -223,5 +223,5 @@ export async function createLiveSession({ onTranscriptionUpdate, onTurnComplete,
 
     const session = await sessionPromise;
     
-    return { session, stream, context, workletNode, source };
+    return { session, stream, context, scriptProcessor, source };
 }

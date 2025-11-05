@@ -1,5 +1,6 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import type { MissedPoint, ReviewResult } from '../types';
+import { Part } from '@google/genai';
 import { getReview, createLiveSession, generateSpeech } from '../services/geminiService';
 import { decode, decodeAudioData } from '../utils/audio';
 import { getAudioContext } from '../utils/audioContext';
@@ -33,7 +34,7 @@ export function VoiceReviewer({ pdfDoc, numPages, currentPage, setHighlightAndNa
   const liveSessionRef = useRef<any>(null);
   const finalTranscriptRef = useRef<string>('');
   const interimTranscriptRef = useRef<string>('');
-  const reviewContextTextRef = useRef<string>('');
+  const reviewContextPartsRef = useRef<Part[]>([]);
 
   useEffect(() => {
     setReviewResult(initialReviewResult);
@@ -58,7 +59,7 @@ export function VoiceReviewer({ pdfDoc, numPages, currentPage, setHighlightAndNa
         return;
     }
     
-    if (!reviewContextTextRef.current) {
+    if (reviewContextPartsRef.current.length === 0) {
         setError("The document context for the review was not loaded. Please try again.");
         setRecordingState('error');
         return;
@@ -66,7 +67,7 @@ export function VoiceReviewer({ pdfDoc, numPages, currentPage, setHighlightAndNa
 
     setRecordingState('processing');
     try {
-      const result = await getReview(reviewContextTextRef.current, finalTranscription);
+      const result = await getReview(reviewContextPartsRef.current, finalTranscription);
       setReviewResult(result);
       onReviewComplete(result);
       setRecordingState('complete');
@@ -87,9 +88,9 @@ export function VoiceReviewer({ pdfDoc, numPages, currentPage, setHighlightAndNa
     if (liveSessionRef.current) {
         liveSessionRef.current.session?.close();
         liveSessionRef.current.stream?.getTracks().forEach((track: MediaStreamTrack) => track.stop());
-        if (liveSessionRef.current.workletNode) {
-            liveSessionRef.current.workletNode.port.onmessage = null;
-            liveSessionRef.current.workletNode.disconnect();
+        if (liveSessionRef.current.scriptProcessor) {
+            liveSessionRef.current.scriptProcessor.onaudioprocess = null;
+            liveSessionRef.current.scriptProcessor.disconnect();
         }
         liveSessionRef.current.source?.disconnect();
         liveSessionRef.current.context?.close();
@@ -114,7 +115,7 @@ export function VoiceReviewer({ pdfDoc, numPages, currentPage, setHighlightAndNa
     setError('');
     finalTranscriptRef.current = '';
     interimTranscriptRef.current = '';
-    reviewContextTextRef.current = '';
+    reviewContextPartsRef.current = [];
     setHighlightAndNavigate(null, null);
 
     if (recordingState !== 'idle' && recordingState !== 'error' && recordingState !== 'complete') return;
@@ -128,94 +129,99 @@ export function VoiceReviewer({ pdfDoc, numPages, currentPage, setHighlightAndNa
     }
 
     try {
-        let fullText = '';
+        const parts: Part[] = [];
+        let hasContent = false;
         const start = Math.max(1, Math.min(startPage, endPage));
         const end = Math.min(numPages, Math.max(startPage, endPage));
 
         for (let i = start; i <= end; i++) {
             const page = await pdfDoc.getPage(i);
             const textContent = await page.getTextContent();
-            const viewport = page.getViewport({ scale: 1 });
-            const pageWidth = viewport.width;
-
-            if (!textContent.items || textContent.items.length === 0) {
-                fullText += `--- PAGE ${i} ---\n[This page is empty or contains only images.]\n\n`;
-                continue;
-            }
-
-            const allItems = textContent.items.filter((item: any) => item.str?.trim());
             
-            // Heuristic for multi-column detection.
-            const leftItems: any[] = [];
-            const rightItems: any[] = [];
-            const midPoint = pageWidth / 2;
+            parts.push({ text: `--- PAGE ${i} ---\n` });
 
-            allItems.forEach((item: any) => {
-                const x = item.transform[4];
-                if (x < midPoint) {
-                    leftItems.push(item);
-                } else {
-                    rightItems.push(item);
-                }
-            });
+            if (textContent.items && textContent.items.length > 0) {
+                hasContent = true;
+                const viewport = page.getViewport({ scale: 1 });
+                const pageWidth = viewport.width;
 
-            const hasSignificantContent = (items: any[]) => {
-                const totalChars = items.reduce((sum, item) => sum + item.str.length, 0);
-                return items.length > 5 && totalChars > 50;
-            };
+                const allItems = textContent.items.filter((item: any) => item.str?.trim());
+                
+                const leftItems: any[] = [];
+                const rightItems: any[] = [];
+                const midPoint = pageWidth / 2;
 
-            const isMultiColumn = hasSignificantContent(leftItems) && hasSignificantContent(rightItems);
-
-            const processItems = (itemsToProcess: any[]) => {
-                itemsToProcess.sort((a: any, b: any) => {
-                    const y1 = a.transform[5];
-                    const y2 = b.transform[5];
-                    const x1 = a.transform[4];
-                    const x2 = b.transform[4];
-
-                    if (Math.abs(y1 - y2) > 5) {
-                        return y2 - y1;
-                    }
-                    return x1 - x2;
+                allItems.forEach((item: any) => {
+                    const x = item.transform[4];
+                    if (x < midPoint) leftItems.push(item);
+                    else rightItems.push(item);
                 });
 
-                let text = '';
-                if (itemsToProcess.length > 0) {
-                    let lastY = itemsToProcess[0].transform[5];
-                    let lastHeight = itemsToProcess[0].height;
+                const hasSignificantContent = (items: any[]) => items.reduce((sum, item) => sum + item.str.length, 0) > 50;
 
-                    for (const item of itemsToProcess) {
-                        const currentY = item.transform[5];
-                        if (Math.abs(currentY - lastY) > lastHeight * 1.5) {
-                            text += '\n';
+                const isMultiColumn = hasSignificantContent(leftItems) && hasSignificantContent(rightItems);
+
+                const processItems = (itemsToProcess: any[]) => {
+                    itemsToProcess.sort((a: any, b: any) => {
+                        const y1 = a.transform[5], y2 = b.transform[5];
+                        const x1 = a.transform[4], x2 = b.transform[4];
+                        if (Math.abs(y1 - y2) > 5) return y2 - y1;
+                        return x1 - x2;
+                    });
+
+                    let text = '';
+                    if (itemsToProcess.length > 0) {
+                        let lastY = itemsToProcess[0].transform[5];
+                        let lastHeight = itemsToProcess[0].height;
+                        for (const item of itemsToProcess) {
+                            if (Math.abs(item.transform[5] - lastY) > lastHeight * 1.5) text += '\n';
+                            text += item.str;
+                            if (!item.str.endsWith(' ')) text += ' ';
+                            lastY = item.transform[5];
+                            lastHeight = item.height;
                         }
-                        text += item.str;
-                        if (!item.str.endsWith(' ')) {
-                            text += ' ';
-                        }
-                        lastY = currentY;
-                        lastHeight = item.height;
                     }
-                }
-                return text;
-            };
+                    return text;
+                };
 
-            let pageText = '';
-            if (isMultiColumn) {
-                const leftText = processItems(leftItems);
-                const rightText = processItems(rightItems);
-                pageText = leftText.trim() + '\n\n' + rightText.trim();
+                let pageText = isMultiColumn
+                    ? processItems(leftItems).trim() + '\n\n' + processItems(rightItems).trim()
+                    : processItems(allItems);
+
+                const cleanedPageText = pageText.replace(/ +/g, ' ').replace(/ \n/g, '\n').trim();
+                parts.push({ text: cleanedPageText + '\n\n' });
             } else {
-                pageText = processItems(allItems);
-            }
+                // Render page as image for OCR
+                hasContent = true;
+                const viewport = page.getViewport({ scale: 1.5 }); // Higher scale for better OCR
+                const canvas = document.createElement('canvas');
+                const context = canvas.getContext('2d');
+                if (!context) continue;
 
-            const cleanedPageText = pageText.replace(/ +/g, ' ').replace(/ \n/g, '\n').trim();
-            fullText += `--- PAGE ${i} ---\n${cleanedPageText}\n\n`;
+                canvas.height = viewport.height;
+                canvas.width = viewport.width;
+                await page.render({ canvasContext: context, viewport }).promise;
+
+                const dataUrl = canvas.toDataURL('image/jpeg', 0.9); // Use JPEG with quality for compression
+                const base64Data = dataUrl.split(',')[1];
+                
+                parts.push({ inlineData: { mimeType: 'image/jpeg', data: base64Data }});
+                parts.push({ text: '\n\n' });
+            }
         }
-        reviewContextTextRef.current = fullText;
+
+        if (!hasContent) {
+            const pageRange = start === end ? `page ${start}` : `pages ${start}-${end}`;
+            setError(`It looks like ${pageRange} is empty. Please select a different page or range with content.`);
+            setRecordingState('error');
+            return;
+        }
+
+        reviewContextPartsRef.current = parts;
+
     } catch (e) {
         console.error("Failed to load context for review:", e);
-        setError('Could not extract text from the specified pages.');
+        setError('Could not extract content from the specified pages.');
         setRecordingState('error');
         return;
     }
