@@ -4,7 +4,6 @@ import { PdfViewer } from './components/PdfViewer';
 import { LogoIcon, XCircleIcon } from './components/Icons';
 import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs";
 import { Loader } from './components/Loader';
-import type { ReviewResult } from './types';
 import * as db from './utils/db';
 
 // Set up the PDF.js worker.
@@ -37,7 +36,6 @@ export default function App() {
   const [view, setView] = useState<'input' | 'review'>('input');
   const [highlightText, setHighlightText] = useState<string | null>(null);
   const [targetPage, setTargetPage] = useState<number | null>(null);
-  const [reviewResult, setReviewResult] = useState<ReviewResult | null>(null);
   
   // Session resume state
   const [sessionChecked, setSessionChecked] = useState<boolean>(false);
@@ -46,7 +44,7 @@ export default function App() {
   const highlightTimeoutRef = useRef<number | null>(null);
   const appStateRef = useRef<any>();
 
-  appStateRef.current = { pdfFile, reviewResult, view };
+  appStateRef.current = { pdfFile, view };
 
   const saveSession = useCallback(async () => {
     const currentState = appStateRef.current;
@@ -63,7 +61,6 @@ export default function App() {
                 name: currentState.pdfFile.name,
                 type: currentState.pdfFile.type,
             },
-            reviewResult: currentState.reviewResult,
         };
         localStorage.setItem(SESSION_KEY, JSON.stringify(sessionData));
     } catch (e) {
@@ -97,7 +94,6 @@ export default function App() {
         }
 
         setPdfFile(file);
-        setReviewResult(savedSessionData.reviewResult);
         setView('review');
         setSavedSessionData(null); // Clear prompt after resuming
     } catch (e) {
@@ -135,7 +131,6 @@ export default function App() {
     setIsProcessing(true);
     setError('');
     setPdfFile(null);
-    setReviewResult(null);
     triggerTempHighlight(null);
     await db.deleteFile(SESSION_KEY);
     localStorage.removeItem(SESSION_KEY);
@@ -165,28 +160,22 @@ export default function App() {
     if (view === 'review' && pdfFile) {
       saveSession();
     }
-  }, [view, pdfFile, reviewResult, saveSession]);
+  }, [view, pdfFile, saveSession]);
 
   const handleReset = async () => {
     setPdfFile(null);
     setError('');
     setView('input');
     triggerTempHighlight(null);
-    setReviewResult(null);
     setSavedSessionData(null);
     await db.deleteFile(SESSION_KEY);
     localStorage.removeItem(SESSION_KEY);
-  };
-
-  const handleReviewComplete = (result: ReviewResult) => {
-    setReviewResult(result);
   };
   
   const handleLoadError = async (message: string) => {
     setError(message);
     setPdfFile(null);
     setView('input');
-    setReviewResult(null);
     setSavedSessionData(null);
     await db.deleteFile(SESSION_KEY);
     localStorage.removeItem(SESSION_KEY);
@@ -199,8 +188,6 @@ export default function App() {
             highlightText={highlightText} 
             targetPage={targetPage}
             onPageNavigated={() => setTargetPage(null)}
-            initialReviewResult={reviewResult}
-            onReviewComplete={handleReviewComplete}
             setHighlightAndNavigate={handleHighlightAndNavigate}
             onReset={handleReset}
             onLoadError={handleLoadError}

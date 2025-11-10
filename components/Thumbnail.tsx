@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 
 interface ThumbnailProps {
     pdfDoc: any;
@@ -11,10 +11,35 @@ interface ThumbnailProps {
 
 const MemoizedThumbnail = React.memo(({ pdfDoc, pageNum, cachedThumb, onThumbGenerated, onClick, isActive }: ThumbnailProps) => {
     const [isLoading, setIsLoading] = useState(!cachedThumb);
+    const thumbRef = useRef<HTMLDivElement>(null);
+    const [isIntersecting, setIsIntersecting] = useState(false);
+
+    useEffect(() => {
+        const observer = new IntersectionObserver(
+            ([entry]) => {
+                if (entry.isIntersecting) {
+                    setIsIntersecting(true);
+                    observer.disconnect(); // Observe only once
+                }
+            },
+            { rootMargin: '200px 0px 200px 0px' } // Pre-load thumbnails slightly outside the viewport
+        );
+
+        const currentRef = thumbRef.current;
+        if (currentRef) {
+            observer.observe(currentRef);
+        }
+
+        return () => {
+            if (currentRef) {
+                observer.unobserve(currentRef);
+            }
+        };
+    }, []);
 
     useEffect(() => {
         let isMounted = true;
-        if (!cachedThumb) {
+        if (isIntersecting && !cachedThumb) {
             const generate = async () => {
                 if (!isMounted) return;
                 setIsLoading(true);
@@ -43,17 +68,18 @@ const MemoizedThumbnail = React.memo(({ pdfDoc, pageNum, cachedThumb, onThumbGen
                 }
             };
             generate();
-        } else {
+        } else if (cachedThumb) {
             setIsLoading(false);
         }
 
         return () => {
             isMounted = false;
         }
-    }, [pdfDoc, pageNum, cachedThumb, onThumbGenerated]);
+    }, [pdfDoc, pageNum, cachedThumb, onThumbGenerated, isIntersecting]);
 
     return (
         <div 
+            ref={thumbRef}
             onClick={onClick} 
             className={`cursor-pointer border-2 p-1 ${isActive ? 'border-blue-500' : 'border-transparent'} rounded-md hover:border-blue-400 bg-white`}
             role="button" tabIndex={0} onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && onClick()}

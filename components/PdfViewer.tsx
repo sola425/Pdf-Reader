@@ -9,7 +9,6 @@ import {
 import { Loader } from './Loader';
 import { PageChat } from './PageChat';
 import { VoiceReviewer } from './VoiceReviewer';
-import type { ReviewResult } from '../types';
 import { Thumbnail } from './Thumbnail';
 
 const PDF_WORKER_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs";
@@ -17,21 +16,27 @@ if (pdfjsLib.GlobalWorkerOptions.workerSrc !== PDF_WORKER_URL) {
     pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_WORKER_URL;
 }
 
+function debounce(func: (...args: any[]) => void, delay: number) {
+    let timeoutId: number;
+    return function(this: any, ...args: any[]) {
+        clearTimeout(timeoutId);
+        timeoutId = window.setTimeout(() => func.apply(this, args), delay);
+    };
+}
+
 interface PdfViewerProps {
   file: File;
   highlightText: string | null;
   targetPage: number | null;
   onPageNavigated: () => void;
-  initialReviewResult: ReviewResult | null;
-  onReviewComplete: (result: ReviewResult) => void;
   setHighlightAndNavigate: (text: string | null, page: number | null) => void;
   onReset: () => void;
   onLoadError: (message: string) => void;
 }
 
 export function PdfViewer({ 
-    file, highlightText, targetPage, onPageNavigated, initialReviewResult,
-    onReviewComplete, setHighlightAndNavigate, onReset, onLoadError 
+    file, highlightText, targetPage, onPageNavigated,
+    setHighlightAndNavigate, onReset, onLoadError 
 }: PdfViewerProps) {
   const [pdfDoc, setPdfDoc] = useState<any | null>(null);
   const [numPages, setNumPages] = useState(0);
@@ -45,6 +50,8 @@ export function PdfViewer({
   const pageRefs = useRef<Array<HTMLDivElement | null>>([]);
   const renderTaskRefs = useRef<Record<number, any>>({});
   const renderedPages = useRef<Map<number, number>>(new Map()); // pageNum -> scale
+  const observerRef = useRef<IntersectionObserver | null>(null);
+  const isProgrammaticScroll = useRef(false);
   
   // Pinned panel state for desktop
   const [isReviewPanelOpen, setIsReviewPanelOpen] = useState(false);
@@ -59,11 +66,14 @@ export function PdfViewer({
 
   const goToPage = useCallback((num: number) => {
     const pageNum = Math.min(Math.max(1, num), numPages);
-    if (pageNum !== currentPage) {
-      setCurrentPage(pageNum);
-      pageRefs.current[pageNum - 1]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-  }, [numPages, currentPage]);
+    isProgrammaticScroll.current = true;
+    pageRefs.current[pageNum - 1]?.scrollIntoView({ behavior: 'auto', block: 'start' });
+    setCurrentPage(pageNum); 
+
+    setTimeout(() => {
+        isProgrammaticScroll.current = false;
+    }, 500); // Allow time for scroll to complete
+  }, [numPages]);
 
   useEffect(() => {
     setPageInput(String(currentPage));
@@ -96,7 +106,6 @@ export function PdfViewer({
   const renderPage = useCallback(async (pageNum: number) => {
     if (!pdfDoc) return;
 
-    // A page is considered rendered if the scale matches.
     if (renderedPages.current.get(pageNum) === scale) {
       return;
     }
@@ -107,7 +116,6 @@ export function PdfViewer({
     const contentContainer = pageContainer.querySelector('.relative');
     if (!contentContainer) return;
 
-    // Cancel any previous render task for this page to avoid conflicts.
     if (renderTaskRefs.current[pageNum]) {
         renderTaskRefs.current[pageNum].cancel();
     }
@@ -116,407 +124,393 @@ export function PdfViewer({
         const page = await pdfDoc.getPage(pageNum);
         const viewport = page.getViewport({ scale });
         
-        // Create fresh canvas and text layer elements for each render operation.
-        // This is the core of the fix to prevent "Cannot use the same canvas" errors.
-        const canvas = document.createElement('canvas');
-        const textLayer = document.createElement('div');
-        textLayer.className = 'textLayer';
-
-        const context = canvas.getContext('2d');
-        if (!context) {
-            console.error("Could not get 2D context for canvas.");
-            return;
-        }
-
-        canvas.height = viewport.height;
-        canvas.width = viewport.width;
-        
-        textLayer.style.width = `${viewport.width}px`;
-        textLayer.style.height = `${viewport.height}px`;
-
-        // Clear any old content and append the new, clean elements.
+        // Clear previous content
         while (contentContainer.firstChild) {
             contentContainer.removeChild(contentContainer.firstChild);
         }
-        contentContainer.appendChild(canvas);
-        contentContainer.appendChild(textLayer);
 
-        const renderTask = page.render({ canvasContext: context, viewport });
+        const canvas = document.createElement('canvas');
+        canvas.className = "w-full h-auto";
+        const canvasContext = canvas.getContext('2d', { willReadFrequently: true });
+        if (!canvasContext) return;
+        
+        canvas.height = viewport.height;
+        canvas.width = viewport.width;
+        contentContainer.appendChild(canvas);
+        
+        const renderContext = {
+            canvasContext,
+            viewport,
+        };
+        const renderTask = page.render(renderContext);
         renderTaskRefs.current[pageNum] = renderTask;
         
         await renderTask.promise;
-        
-        // On successful render, mark it as rendered at the current scale.
-        renderedPages.current.set(pageNum, scale);
 
+        // Render text layer
         const textContent = await page.getTextContent();
-        // The text layer must be rendered after the canvas.
-        await pdfjsLib.renderTextLayer({ textContentSource: textContent, container: textLayer, viewport }).promise;
+        const textLayer = document.createElement('div');
+        textLayer.className = 'textLayer';
+        contentContainer.appendChild(textLayer);
+        pdfjsLib.renderTextLayer({
+            textContentSource: textContent,
+            container: textLayer,
+            viewport: viewport,
+            textDivs: []
+        });
 
-    } catch (error: any) {
-        // 'RenderingCancelledException' is expected when a new render call interrupts an old one.
-        // We only log other, unexpected errors.
-        if (error.name !== 'RenderingCancelledException') {
-            console.error(`Error rendering page ${pageNum}:`, error);
-        }
-    } finally {
-        // Ensure the task reference is cleaned up, regardless of success, failure, or cancellation.
+        renderedPages.current.set(pageNum, scale);
         delete renderTaskRefs.current[pageNum];
+    } catch (error: any) {
+        if (error.name !== 'RenderingCancelledException') {
+            console.error(`Failed to render page ${pageNum}:`, error);
+        }
     }
   }, [pdfDoc, scale]);
 
-  const fitToWidth = useCallback(async (isInitial = false) => {
-      if (!pdfDoc || !viewerRef.current) return;
-      
-      const page = await pdfDoc.getPage(1); // Use page 1 for reference
-      const unscaledViewport = page.getViewport({ scale: 1 });
-      
-      const styles = window.getComputedStyle(viewerRef.current);
-      const paddingX = parseFloat(styles.paddingLeft) + parseFloat(styles.paddingRight);
-      
-      const availableWidth = viewerRef.current.clientWidth - paddingX;
-      
-      const newScale = availableWidth / unscaledViewport.width;
-      
-      if(isInitial) {
-          setScale(newScale);
-      } else {
-          if (Math.abs(scale - newScale) > 0.01) {
-              setScale(newScale);
-          }
-      }
-  }, [pdfDoc, scale]);
+  const updateVisiblePages = useCallback(() => {
+    if (!pdfDoc || !viewerRef.current) return;
+    const viewerRect = viewerRef.current.getBoundingClientRect();
 
-  useEffect(() => {
-    const loadPdf = async () => {
-      setIsLoading(true);
-      setPdfDoc(null);
-      setNumPages(0);
-      setPageViewports([]);
-      pageRefs.current = [];
-      renderedPages.current.clear();
-      setThumbnailCache({});
-      try {
-        const fileUrl = URL.createObjectURL(file);
-        const loadingTask = pdfjsLib.getDocument(fileUrl);
-        const doc = await loadingTask.promise;
-        setPdfDoc(doc);
-        setNumPages(doc.numPages);
-
-        const viewports = [];
-        for (let i = 1; i <= doc.numPages; i++) {
-            const page = await doc.getPage(i);
-            viewports.push(page.getViewport({ scale: 1 }));
+    for (let i = 0; i < numPages; i++) {
+        const pageEl = pageRefs.current[i];
+        if (pageEl) {
+            const pageRect = pageEl.getBoundingClientRect();
+            // Check if page is within the viewport
+            if (pageRect.top < viewerRect.bottom && pageRect.bottom > viewerRect.top) {
+                renderPage(i + 1);
+            }
         }
-        setPageViewports(viewports);
-        URL.revokeObjectURL(fileUrl);
-        setIsLoading(false);
-      } catch (error) {
-        console.error("Error loading PDF:", error);
-        onLoadError("Failed to load PDF. The file might be corrupted or unsupported.");
+    }
+  }, [pdfDoc, numPages, renderPage]);
+
+  // Main effect to load the PDF document
+  useEffect(() => {
+    if (!file) return;
+    setIsLoading(true);
+
+    const loadPdf = async () => {
+      try {
+        const fileReader = new FileReader();
+        fileReader.onload = async (e) => {
+          if (!e.target?.result) {
+            onLoadError("Failed to read the file.");
+            return;
+          }
+          const typedarray = new Uint8Array(e.target.result as ArrayBuffer);
+          const doc = await pdfjsLib.getDocument({ data: typedarray }).promise;
+          
+          const viewports = [];
+          for (let i = 1; i <= doc.numPages; i++) {
+              const page = await doc.getPage(i);
+              viewports.push(page.getViewport({ scale: 1.0 }));
+          }
+          setPageViewports(viewports);
+
+          setPdfDoc(doc);
+          setNumPages(doc.numPages);
+          pageRefs.current = Array(doc.numPages).fill(null);
+          setIsLoading(false);
+        };
+        fileReader.onerror = () => {
+          onLoadError("Error reading the file.");
+        };
+        fileReader.readAsArrayBuffer(file);
+      } catch (err: any) {
+        onLoadError(err.message || "Failed to load PDF.");
       }
     };
-    if (file) loadPdf();
+
+    loadPdf();
   }, [file, onLoadError]);
   
+  // Effect for IntersectionObserver to sync current page on scroll
   useEffect(() => {
-    if (pageViewports.length > 0) {
-      fitToWidth(true);
+    if (!pdfDoc || !viewerRef.current) return;
+
+    if (observerRef.current) observerRef.current.disconnect();
+
+    const options = {
+        root: viewerRef.current,
+        rootMargin: "-40% 0px -40% 0px", // Page is "current" when it's in the middle 20% of the screen
+        threshold: 0,
+    };
+    
+    const handleIntersect = (entries: IntersectionObserverEntry[]) => {
+        if (isProgrammaticScroll.current) return;
+
+        const intersectingPages = entries.filter(e => e.isIntersecting);
+        if (intersectingPages.length > 0) {
+            // Find the one with the largest intersection ratio
+            const bestPage = intersectingPages.reduce((prev, current) => 
+                (prev.intersectionRatio > current.intersectionRatio) ? prev : current
+            );
+            const pageNum = parseInt(bestPage.target.getAttribute('data-page-number') || '0', 10);
+            if (pageNum) {
+                setCurrentPage(pageNum);
+            }
+        }
+    };
+    
+    observerRef.current = new IntersectionObserver(handleIntersect, options);
+    const observer = observerRef.current;
+    pageRefs.current.forEach(pageEl => {
+        if (pageEl) observer.observe(pageEl);
+    });
+
+    return () => observer.disconnect();
+  }, [pdfDoc]);
+
+  // Effect to handle lazy rendering on scroll
+  useEffect(() => {
+    const viewer = viewerRef.current;
+    if (!viewer) return;
+
+    const debouncedUpdate = debounce(updateVisiblePages, 150);
+    
+    updateVisiblePages(); // Initial render
+    viewer.addEventListener('scroll', debouncedUpdate);
+    window.addEventListener('resize', debouncedUpdate);
+
+    return () => {
+        viewer.removeEventListener('scroll', debouncedUpdate);
+        window.removeEventListener('resize', debouncedUpdate);
     }
-  }, [pageViewports, fitToWidth]);
-
-  useEffect(() => {
-    const container = viewerRef.current;
-    if (!container || !pdfDoc) return;
-    const resizeObserver = new ResizeObserver(() => {
-        fitToWidth(false);
-    });
-    resizeObserver.observe(container);
-    return () => resizeObserver.disconnect();
-  }, [pdfDoc, fitToWidth]);
+  }, [updateVisiblePages]);
   
+  // Effect to handle targeted page navigation
   useEffect(() => {
-      const viewer = viewerRef.current;
-      if (!viewer || numPages === 0) return;
-
-      const observer = new IntersectionObserver(
-          (entries) => {
-              let mostVisiblePage = null;
-              let maxVisibility = -1;
-
-              entries.forEach(entry => {
-                  const pageNum = parseInt((entry.target as HTMLElement).dataset.pageNumber!, 10);
-                  if (entry.isIntersecting) {
-                      renderPage(pageNum);
-                  }
-                  
-                  if (entry.intersectionRatio > maxVisibility) {
-                      maxVisibility = entry.intersectionRatio;
-                      mostVisiblePage = pageNum;
-                  }
-              });
-
-              if (mostVisiblePage) {
-                  setCurrentPage(mostVisiblePage);
-              }
-          },
-          { root: viewer, threshold: [0, 0.25, 0.5, 0.75, 1] }
-      );
-
-      pageRefs.current.forEach(ref => {
-          if (ref) observer.observe(ref);
-      });
-
-      return () => observer.disconnect();
-  }, [numPages, renderPage]);
-
-  useEffect(() => {
-    if (!pdfDoc) return;
-    renderedPages.current.clear();
-    pageRefs.current.forEach((ref, index) => {
-      const pageNum = index + 1;
-      if (ref && ref.getBoundingClientRect().top < window.innerHeight && ref.getBoundingClientRect().bottom > 0) {
-        renderPage(pageNum);
-      }
-    });
-  }, [scale, pdfDoc, renderPage]);
-  
-  useEffect(() => {
-    if (targetPage) {
+    if (targetPage && pdfDoc) {
       goToPage(targetPage);
       onPageNavigated();
     }
-  }, [targetPage, onPageNavigated, goToPage]);
-
+  }, [targetPage, pdfDoc, goToPage, onPageNavigated]);
+  
   useEffect(() => {
-    pageRefs.current.forEach(pageRef => {
-        pageRef?.querySelectorAll('.temporary-highlight').forEach(el => {
-            const parent = el.parentNode;
-            while (el.firstChild) {
-                parent?.insertBefore(el.firstChild, el);
-            }
-            parent?.removeChild(el);
-        });
-    });
+    // Re-render pages on scale change
+    renderedPages.current.clear();
+    updateVisiblePages();
+  }, [scale, updateVisiblePages]);
 
+  // Temporary highlighting logic
+  useEffect(() => {
     if (!highlightText) return;
+
+    document.querySelectorAll('.temporary-highlight').forEach(el => el.classList.remove('temporary-highlight'));
     
     const pageContainer = pageRefs.current[currentPage - 1];
-    const textLayer = pageContainer?.querySelector('.textLayer');
-
+    if (!pageContainer) return;
+    
+    const textLayer = pageContainer.querySelector('.textLayer');
     if (!textLayer) return;
 
-    const walker = document.createTreeWalker(textLayer, NodeFilter.SHOW_TEXT, null);
-    const ranges = [];
-    let node;
-    while (node = walker.nextNode()) {
-        const text = node.nodeValue || '';
-        let index = text.indexOf(highlightText);
-        while (index !== -1) {
-            const range = document.createRange();
-            range.setStart(node, index);
-            range.setEnd(node, index + highlightText.length);
-            ranges.push(range);
-            index = text.indexOf(highlightText, index + 1);
+    // FIX: Specify HTMLSpanElement as the generic type to querySelectorAll to ensure
+    // that the elements are correctly typed. This resolves errors where properties
+    // like `textContent` and `getBoundingClientRect` could not be accessed on
+    // what TypeScript was inferring as an `unknown` type.
+    const textSpans = Array.from(textLayer.querySelectorAll<HTMLSpanElement>('span'));
+    const textContent = textSpans.map(span => span.textContent || '').join('');
+    
+    const startIndex = textContent.indexOf(highlightText);
+    if (startIndex === -1) return;
+    
+    let charCount = 0;
+    let startSpanIndex = -1, endSpanIndex = -1;
+    let startOffset = 0, endOffset = 0;
+
+    for (let i = 0; i < textSpans.length; i++) {
+        const spanText = textSpans[i].textContent || '';
+        const spanLength = spanText.length;
+        if (startSpanIndex === -1 && charCount + spanLength >= startIndex) {
+            startSpanIndex = i;
+            startOffset = startIndex - charCount;
+        }
+        if (endSpanIndex === -1 && charCount + spanLength >= startIndex + highlightText.length) {
+            endSpanIndex = i;
+            endOffset = (startIndex + highlightText.length) - charCount;
+            break;
+        }
+        charCount += spanLength;
+    }
+    
+    if (startSpanIndex !== -1 && endSpanIndex !== -1) {
+        for (let i = startSpanIndex; i <= endSpanIndex; i++) {
+            const span = textSpans[i];
+            const originalSpanRect = span.getBoundingClientRect();
+            const textLayerRect = textLayer.getBoundingClientRect();
+
+            const highlightDiv = document.createElement('div');
+            highlightDiv.className = 'absolute temporary-highlight';
+            highlightDiv.style.left = `${originalSpanRect.left - textLayerRect.left}px`;
+            highlightDiv.style.top = `${originalSpanRect.top - textLayerRect.top}px`;
+            highlightDiv.style.width = `${originalSpanRect.width}px`;
+            highlightDiv.style.height = `${originalSpanRect.height}px`;
+
+            textLayer.appendChild(highlightDiv);
         }
     }
-    ranges.forEach(range => {
-        const highlightSpan = document.createElement('span');
-        highlightSpan.className = 'temporary-highlight';
-        try { range.surroundContents(highlightSpan); } 
-        catch(e) { console.warn("Could not highlight text across multiple elements:", highlightText); }
-    });
   }, [highlightText, currentPage]);
 
-  const handleThumbGenerated = useCallback((pageNum: number, dataUrl: string) => {
-    setThumbnailCache(prev => ({ ...prev, [pageNum]: dataUrl }));
-  }, []);
+
+  if (isLoading) {
+    return (
+      <div className="flex flex-col items-center justify-center min-h-screen bg-slate-100">
+        <Loader />
+        <p className="mt-4 font-semibold text-slate-700">Loading Document...</p>
+      </div>
+    );
+  }
   
-  const ThumbnailsList = (
-    <div className="grid grid-cols-1 gap-3">
-        {Array.from({ length: numPages }, (_, i) => i + 1).map(pageNum => (
-            <Thumbnail
-                key={pageNum}
-                pdfDoc={pdfDoc}
-                pageNum={pageNum}
-                cachedThumb={thumbnailCache[pageNum] || null}
-                onThumbGenerated={handleThumbGenerated}
-                onClick={() => {
-                  goToPage(pageNum);
-                  setIsMobileThumbnailsOpen(false);
-                }}
-                isActive={currentPage === pageNum}
-            />
-        ))}
-    </div>
+  const mainContent = (
+    <main 
+        ref={viewerRef}
+        className="flex-1 bg-slate-200 overflow-y-auto scroll-smooth"
+    >
+        <div className="mx-auto my-4">
+            {Array.from({ length: numPages }, (_, i) => (
+                <div
+                    key={i}
+                    ref={el => pageRefs.current[i] = el}
+                    data-page-number={i + 1}
+                    className="relative mx-auto my-4 bg-white shadow-lg"
+                    style={{ width: `${(pageViewports[i]?.width || 800) * scale}px` }}
+                >
+                    <div className="relative">
+                        {/* Canvas and text layer will be inserted here by renderPage */}
+                    </div>
+                    <div className="absolute bottom-2 right-2 bg-black/50 text-white text-xs font-bold px-2 py-1 rounded">
+                        {i + 1} / {numPages}
+                    </div>
+                </div>
+            ))}
+        </div>
+    </main>
   );
 
-  if (isLoading || pageViewports.length === 0) {
-      return (
-        <div className="min-h-screen bg-slate-100 flex flex-col items-center justify-center">
-            <Loader />
-            <p className="mt-4 text-slate-600 font-semibold">Preparing Document...</p>
+  const header = (
+    <header className="bg-slate-800 text-white shadow-md p-2 flex items-center justify-between z-20 flex-shrink-0">
+        <div className="flex items-center gap-2">
+            <button onClick={onReset} className="p-2 rounded-md hover:bg-slate-700 transition-colors" aria-label="Go back">
+                <ArrowLeftIcon className="w-6 h-6" />
+            </button>
+            <button onClick={() => setIsMobileThumbnailsOpen(true)} className="p-2 rounded-md hover:bg-slate-700 transition-colors lg:hidden" aria-label="Toggle thumbnails">
+                <BookOpenIcon className="w-6 h-6" />
+            </button>
+            <h2 className="font-semibold text-lg truncate max-w-xs sm:max-w-md hidden sm:block">{file.name}</h2>
         </div>
-      );
-  }
+        <div className="flex items-center gap-2 justify-center">
+            <button onClick={() => goToPage(1)} className="p-2 rounded-md hover:bg-slate-700 transition-colors" aria-label="First page">
+                <ChevronDoubleLeftIcon className="w-5 h-5" />
+            </button>
+            <button onClick={() => goToPage(currentPage - 1)} className="p-2 rounded-md hover:bg-slate-700 transition-colors" aria-label="Previous page">
+                <ChevronLeftIcon className="w-5 h-5" />
+            </button>
+            <div className="flex items-center text-sm">
+                <input 
+                    type="text"
+                    value={pageInput}
+                    onChange={handlePageInputChange}
+                    onKeyDown={handlePageInputKeyDown}
+                    onBlur={handlePageInputBlur}
+                    className="w-12 bg-slate-700 text-center rounded-md border-slate-600 focus:ring-blue-500 focus:border-blue-500"
+                />
+                <span className="px-2">/ {numPages}</span>
+            </div>
+            <button onClick={() => goToPage(currentPage + 1)} className="p-2 rounded-md hover:bg-slate-700 transition-colors" aria-label="Next page">
+                <ChevronRightIcon className="w-5 h-5" />
+            </button>
+            <button onClick={() => goToPage(numPages)} className="p-2 rounded-md hover:bg-slate-700 transition-colors" aria-label="Last page">
+                <ChevronDoubleRightIcon className="w-5 h-5" />
+            </button>
+        </div>
+        <div className="flex items-center gap-2">
+            <button onClick={() => setScale(s => s + 0.1)} className="p-2 rounded-md hover:bg-slate-700 transition-colors" aria-label="Zoom in">
+                <ZoomInIcon className="w-6 h-6" />
+            </button>
+            <button onClick={() => setScale(s => s - 0.1)} className="p-2 rounded-md hover:bg-slate-700 transition-colors" aria-label="Zoom out">
+                <ZoomOutIcon className="w-6 h-6" />
+            </button>
+            <button onClick={() => setIsChatOpen(true)} className="p-2 rounded-md hover:bg-slate-700 transition-colors" aria-label="Chat about page">
+                <ChatBubbleIcon className="w-6 h-6" />
+            </button>
+            <button onClick={() => isReviewPanelOpen ? setIsReviewPanelOpen(false) : setIsMobileReviewOpen(true)} className="p-2 rounded-md hover:bg-slate-700 transition-colors" aria-label="Start voice review">
+                <DocumentDuplicateIcon className="w-6 h-6" />
+            </button>
+        </div>
+    </header>
+  );
+  
+  const thumbnailSidebar = (
+    <aside className="w-48 bg-slate-100 border-r border-slate-300 p-2 overflow-y-auto hidden lg:block">
+        <div className="space-y-2">
+            {Array.from({ length: numPages }).map((_, i) => (
+                <Thumbnail 
+                    key={i}
+                    pdfDoc={pdfDoc}
+                    pageNum={i + 1}
+                    cachedThumb={thumbnailCache[i + 1]}
+                    onThumbGenerated={(pageNum, dataUrl) => setThumbnailCache(prev => ({...prev, [pageNum]: dataUrl}))}
+                    onClick={() => goToPage(i + 1)}
+                    isActive={currentPage === i + 1}
+                />
+            ))}
+        </div>
+    </aside>
+  );
 
   return (
-    <div className="h-screen w-screen bg-slate-200 flex flex-col overflow-hidden">
-      <header className="bg-slate-800 text-white p-2 flex items-center justify-between z-20 shadow-md">
-        <div className="flex items-center gap-2">
-            <button onClick={onReset} className="p-2 rounded-md hover:bg-slate-700 flex items-center gap-2 text-sm">
-                <ArrowLeftIcon className="w-5 h-5" /> Back
-            </button>
-            <span className="w-px h-6 bg-slate-600"></span>
-            <h2 className="text-lg font-semibold truncate max-w-xs sm:max-w-md" title={file.name}>{file.name}</h2>
+    <div className="h-screen w-screen flex flex-col bg-slate-50 overflow-hidden">
+        {header}
+        <div className="flex flex-1 min-h-0">
+            {thumbnailSidebar}
+            {mainContent}
+            {isReviewPanelOpen && (
+                <aside className="w-96 bg-white border-l border-slate-300 hidden lg:flex flex-col">
+                    <VoiceReviewer pdfDoc={pdfDoc} numPages={numPages} currentPage={currentPage} onClose={() => setIsReviewPanelOpen(false)} />
+                </aside>
+            )}
         </div>
-        
-        <div className="flex items-center gap-1 sm:gap-2">
-            <button onClick={() => setIsChatOpen(o => !o)} className={`p-2 rounded-md ${isChatOpen ? 'bg-blue-600' : 'hover:bg-slate-700'}`} aria-label="Chat with page content">
-                <ChatBubbleIcon className="w-5 h-5"/>
-            </button>
-            <button onClick={() => setIsReviewPanelOpen(o => !o)} className={`hidden md:flex p-2 rounded-md ${isReviewPanelOpen ? 'bg-blue-600' : 'hover:bg-slate-700'}`} aria-label="Toggle review panel">
-                <DocumentDuplicateIcon className="w-5 h-5" />
-            </button>
-            <button onClick={() => setIsThumbnailsPanelOpen(o => !o)} className={`hidden md:flex p-2 rounded-md ${isThumbnailsPanelOpen ? 'bg-blue-600' : 'hover:bg-slate-700'}`} aria-label="Toggle thumbnails panel">
-                <BookOpenIcon className="w-5 h-5" />
-            </button>
-             <button onClick={() => setIsMobileReviewOpen(o => !o)} className="md:hidden p-2 rounded-md hover:bg-slate-700" aria-label="Open review panel">
-                <DocumentDuplicateIcon className="w-5 h-5" />
-            </button>
-            <button onClick={() => setIsMobileThumbnailsOpen(o => !o)} className="md:hidden p-2 rounded-md hover:bg-slate-700" aria-label="Open thumbnails panel">
-                <MenuIcon className="w-5 h-5" />
-            </button>
-        </div>
-      </header>
-      
-      <div className="flex-1 flex min-h-0">
-        {/* Thumbnails Panel (Desktop) */}
-        <aside className={`flex-shrink-0 bg-slate-100 border-r border-slate-300 overflow-y-auto transition-all duration-300 ease-in-out ${isThumbnailsPanelOpen ? 'w-48 p-2' : 'w-0'}`}>
-          {ThumbnailsList}
-        </aside>
-        
-        <main className="flex-1 flex flex-col min-w-0">
-            <div ref={viewerRef} className="flex-1 overflow-y-auto bg-slate-100 p-4 relative scroll-smooth">
-                {pageViewports.map((viewport, index) => {
-                    const pageNum = index + 1;
-                    return (
-                        <div
-                            key={pageNum}
-                            ref={el => pageRefs.current[pageNum - 1] = el}
-                            data-page-number={pageNum}
-                            className="mb-4 shadow-lg mx-auto"
-                            style={{ width: viewport.width * scale, height: viewport.height * scale }}
-                        >
-                            <div className="relative">
-                                <canvas />
-                                <div className="textLayer" />
-                            </div>
-                        </div>
-                    );
-                })}
-            </div>
-        </main>
-        
-        {/* Review Panel (Desktop) */}
-        <aside className={`flex-shrink-0 bg-white border-l border-slate-300 transition-all duration-300 ease-in-out ${isReviewPanelOpen ? 'w-96' : 'w-0'}`}>
-            <div className="w-96 h-full overflow-hidden">
-              <VoiceReviewer 
+
+        {isChatOpen && (
+            <PageChat
                 pdfDoc={pdfDoc}
                 numPages={numPages}
                 currentPage={currentPage}
-                setHighlightAndNavigate={setHighlightAndNavigate}
-                onReviewComplete={onReviewComplete}
-                initialReviewResult={initialReviewResult}
-              />
+                isOpen={isChatOpen}
+                onClose={() => setIsChatOpen(false)}
+            />
+        )}
+        
+        {/* Mobile Drawers */}
+        {isMobileThumbnailsOpen && (
+            <div className="lg:hidden fixed inset-0 z-30">
+                <div className="absolute inset-0 bg-black/50 animate-fade-in" onClick={() => setIsMobileThumbnailsOpen(false)}></div>
+                <div className="absolute top-0 left-0 bottom-0 w-48 bg-slate-100 p-2 overflow-y-auto animate-slide-in-left">
+                    <div className="space-y-2">
+                        {Array.from({ length: numPages }).map((_, i) => (
+                            <Thumbnail 
+                                key={i}
+                                pdfDoc={pdfDoc}
+                                pageNum={i + 1}
+                                cachedThumb={thumbnailCache[i + 1]}
+                                onThumbGenerated={(pageNum, dataUrl) => setThumbnailCache(prev => ({...prev, [pageNum]: dataUrl}))}
+                                onClick={() => { goToPage(i + 1); setIsMobileThumbnailsOpen(false); }}
+                                isActive={currentPage === i + 1}
+                            />
+                        ))}
+                    </div>
+                </div>
             </div>
-        </aside>
-      </div>
+        )}
 
-      {/* Floating Controls */}
-      <div className="fixed bottom-0 md:bottom-4 left-0 right-0 md:left-1/2 md:-translate-x-1/2 md:w-auto z-30 flex justify-center">
-          <div className="flex items-center justify-between md:justify-center w-full md:w-auto md:gap-2 bg-white/80 backdrop-blur-md text-slate-800 p-2 md:rounded-full shadow-xl border border-slate-200/80">
-              {/* Page controls */}
-              <div className="flex items-center gap-2">
-                 <button onClick={() => goToPage(currentPage - 1)} disabled={currentPage <= 1} className="p-1 rounded-full hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed" aria-label="Previous page">
-                     <ChevronLeftIcon className="w-6 h-6" />
-                 </button>
-                 <div className="flex items-center text-sm font-medium">
-                     <input 
-                         type="text" 
-                         value={pageInput}
-                         onChange={handlePageInputChange}
-                         onBlur={handlePageInputBlur}
-                         onKeyDown={handlePageInputKeyDown}
-                         className="w-10 text-center bg-slate-100/50 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500 focus:bg-white"
-                         aria-label={`Current page, page ${currentPage} of ${numPages}`}
-                     />
-                     <span className="px-1">/ {numPages}</span>
-                 </div>
-                 <button onClick={() => goToPage(currentPage + 1)} disabled={currentPage >= numPages} className="p-1 rounded-full hover:bg-slate-200 disabled:opacity-50 disabled:cursor-not-allowed" aria-label="Next page">
-                     <ChevronRightIcon className="w-6 h-6" />
-                 </button>
-              </div>
-              
-              <div className="hidden md:block w-px h-6 bg-slate-300 mx-2"></div>
-              
-              <div className="flex items-center gap-2">
-                  <button onClick={() => setScale(s => Math.max(0.25, s * 0.9))} className="p-1 rounded-full hover:bg-slate-200" aria-label="Zoom out">
-                      <ZoomOutIcon className="w-6 h-6" />
-                  </button>
-                  <button onClick={() => setScale(s => Math.min(3, s * 1.1))} className="p-1 rounded-full hover:bg-slate-200" aria-label="Zoom in">
-                      <ZoomInIcon className="w-6 h-6" />
-                  </button>
-                  <button onClick={() => fitToWidth(false)} className="p-1 rounded-full hover:bg-slate-200" aria-label="Fit to width">
-                      <FitToWidthIcon className="w-6 h-6" />
-                  </button>
-              </div>
-          </div>
-      </div>
-      
-      {/* Mobile Thumbnail Drawer */}
-      {isMobileThumbnailsOpen && (
-          <div className="md:hidden fixed inset-0 z-40 animate-fade-in" role="dialog" aria-modal="true">
-              <div onClick={() => setIsMobileThumbnailsOpen(false)} className="absolute inset-0 bg-black/40"></div>
-              <div className="absolute top-0 left-0 bottom-0 w-4/5 max-w-xs bg-slate-100 shadow-xl p-2 overflow-y-auto animate-slide-in-left">
-                  <div className="flex justify-end mb-2">
-                      <button onClick={() => setIsMobileThumbnailsOpen(false)} className="p-1 rounded-full hover:bg-slate-200" aria-label="Close thumbnails">
-                          <XIcon className="w-6 h-6 text-slate-600"/>
-                      </button>
-                  </div>
-                  {ThumbnailsList}
-              </div>
-          </div>
-      )}
-
-      {/* Mobile Review Drawer */}
-      {isMobileReviewOpen && (
-          <div className="md:hidden fixed inset-0 z-40 animate-fade-in" role="dialog" aria-modal="true">
-              <div onClick={() => setIsMobileReviewOpen(false)} className="absolute inset-0 bg-black/40"></div>
-              <div className="absolute top-0 right-0 bottom-0 w-full sm:w-4/5 sm:max-w-md bg-white shadow-xl overflow-y-auto animate-slide-in-right">
-                <VoiceReviewer 
-                  pdfDoc={pdfDoc}
-                  numPages={numPages}
-                  currentPage={currentPage}
-                  setHighlightAndNavigate={setHighlightAndNavigate}
-                  onReviewComplete={onReviewComplete}
-                  initialReviewResult={initialReviewResult}
-                  onClose={() => setIsMobileReviewOpen(false)}
-                />
-              </div>
-          </div>
-      )}
-
-      {/* Chat Modal */}
-      {isChatOpen && (
-        <PageChat 
-            pdfDoc={pdfDoc} 
-            numPages={numPages} 
-            currentPage={currentPage} 
-            isOpen={isChatOpen}
-            onClose={() => setIsChatOpen(false)}
-        />
-      )}
+        {isMobileReviewOpen && (
+            <div className="lg:hidden fixed inset-0 z-30">
+                 <div className="absolute inset-0 bg-black/50 animate-fade-in" onClick={() => setIsMobileReviewOpen(false)}></div>
+                <div className="absolute top-0 right-0 bottom-0 w-full max-w-md bg-white animate-slide-in-right flex flex-col">
+                    <VoiceReviewer pdfDoc={pdfDoc} numPages={numPages} currentPage={currentPage} onClose={() => setIsMobileReviewOpen(false)} />
+                </div>
+            </div>
+        )}
     </div>
   );
 }
