@@ -1,34 +1,29 @@
+
 import React, { useState, useCallback } from 'react';
-import { UploadIcon, XIcon } from './Icons';
+import { UploadIcon } from './Icons';
 
 interface DocumentInputProps {
-  onSubmit: (data: File) => void;
-  savedSessionData: any | null;
-  onResumeSession: () => void;
-  onClearSavedSession: () => Promise<void>;
+  onFileSelect: (data: File) => void;
 }
 
-export function DocumentInput({ onSubmit, savedSessionData, onResumeSession, onClearSavedSession }: DocumentInputProps) {
-  const [fileName, setFileName] = useState<string>('');
+export function DocumentInput({ onFileSelect }: DocumentInputProps) {
   const [error, setError] = useState<string>('');
-  const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [isDragging, setIsDragging] = useState(false);
 
   const handleFile = useCallback((file: File) => {
     setError('');
-    if (file.type === 'application/pdf') {
-        setSelectedFile(file);
-        setFileName(file.name);
+    if (file.type === 'application/pdf' || file.type.startsWith('image/')) {
+        onFileSelect(file);
     } else {
-        setError('Unsupported file type. Please upload a PDF file.');
-        setSelectedFile(null);
-        setFileName('');
+        setError('Unsupported file type. Please upload a PDF or an image file.');
     }
-  }, []);
+  }, [onFileSelect]);
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (file) handleFile(file);
+    // Reset the input so the same file can be selected again
+    e.target.value = '';
   };
   
   const handleDragEvents = (e: React.DragEvent) => {
@@ -53,83 +48,30 @@ export function DocumentInput({ onSubmit, savedSessionData, onResumeSession, onC
     if (file) handleFile(file);
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (selectedFile) {
-        onSubmit(selectedFile);
-    }
-  };
-
-  const isSubmitDisabled = !selectedFile;
-
   return (
-    <div className="bg-white p-6 sm:p-8 rounded-2xl shadow-lg border border-slate-200/80 w-full max-w-3xl mx-auto animate-fade-in">
-      {savedSessionData && (
-        <div className="mb-6 p-4 bg-indigo-50 border border-indigo-200 rounded-lg flex items-center justify-between animate-fade-in flex-wrap gap-2">
-            <div>
-                <p className="font-semibold text-indigo-800">You have a previous session saved.</p>
-                <p className="text-sm text-indigo-700">Resume reviewing '{savedSessionData.fileData.name}'.</p>
-            </div>
-            <div className="flex items-center gap-2">
-                <button 
-                  onClick={onResumeSession} 
-                  className="px-4 py-2 bg-indigo-600 text-white font-semibold rounded-md hover:bg-indigo-700 text-sm transition-colors"
-                >
-                    Resume
-                </button>
-                <button onClick={onClearSavedSession} className="p-2 text-slate-500 hover:bg-slate-200 rounded-full" aria-label="Dismiss saved session">
-                    <XIcon className="w-5 h-5" />
-                </button>
-            </div>
+    <>
+      <div 
+        onDragEnter={handleDragEnter}
+        onDragOver={handleDragEvents}
+        onDragLeave={handleDragLeave}
+        onDrop={handleDrop}
+        className={`relative border-2 border-dashed rounded-xl p-6 transition-colors duration-200 ${isDragging ? 'border-blue-500 bg-blue-50' : 'border-slate-300 bg-slate-50'}`}
+      >
+        <div className="flex flex-col items-center justify-center space-y-4 text-center">
+          <UploadIcon className="mx-auto h-12 w-12 text-slate-400" />
+          <p className="text-slate-600">
+            <label htmlFor="file-upload" className="font-semibold text-blue-600 hover:text-blue-700 cursor-pointer focus-within:outline-none focus-within:ring-2 focus-within:ring-offset-2 focus-within:ring-blue-500">
+              Upload a Document
+            </label>
+            {' '}or drag and drop
+          </p>
+          <p className="text-xs text-slate-500">PDF or Image files up to 100MB</p>
+          <input id="file-upload" type="file" accept=".pdf,application/pdf,image/*" onChange={handleFileChange} className="sr-only" />
         </div>
-      )}
-
-      <div className="text-center mb-8">
-        <h2 className="text-2xl sm:text-3xl font-extrabold tracking-tight text-slate-900">Start Your Review Session</h2>
-        <p className="mt-2 text-base sm:text-lg text-slate-600">
-          Upload a PDF to improve your comprehension and recall.
-        </p>
       </div>
-      <form onSubmit={handleSubmit}>
-        <div 
-          onDragEnter={handleDragEnter}
-          onDragOver={handleDragEvents}
-          onDragLeave={handleDragLeave}
-          onDrop={handleDrop}
-          className={`relative border-2 border-dashed rounded-xl p-6 transition-colors duration-200 ${isDragging ? 'border-blue-500 bg-blue-50' : 'border-slate-300 bg-slate-50'}`}
-        >
-          <div className="flex flex-col items-center justify-center space-y-4 text-center">
-            <UploadIcon className="mx-auto h-12 w-12 text-slate-400" />
-            <p className="text-slate-600">
-              <label htmlFor="file-upload" className="font-semibold text-blue-600 hover:text-blue-700 cursor-pointer focus-within:outline-none focus-within:ring-2 focus-within:ring-offset-2 focus-within:ring-blue-500">
-                Upload a PDF
-              </label>
-              {' '}or drag and drop
-            </p>
-            <p className="text-xs text-slate-500">PDF files up to 100MB</p>
-            <input id="file-upload" type="file" accept=".pdf,application/pdf" onChange={handleFileChange} className="sr-only" />
-          </div>
-        </div>
-        
-        {fileName && (
-            <div className="mt-4 p-3 bg-blue-50 text-blue-800 rounded-md border border-blue-200 text-sm font-medium">
-                Selected file: <strong>{fileName}</strong>
-            </div>
-        )}
-         {error && (
-            <p className="mt-2 text-sm text-red-600">{error}</p>
-        )}
-        
-        <div className="mt-8">
-          <button
-            type="submit"
-            disabled={isSubmitDisabled}
-            className="w-full px-6 py-4 bg-gradient-to-r from-blue-600 to-blue-500 text-white font-bold text-lg rounded-lg hover:from-blue-700 hover:to-blue-600 transition-all shadow-lg focus:outline-none focus:ring-4 focus:ring-blue-300 disabled:bg-slate-400 disabled:cursor-not-allowed disabled:shadow-none disabled:bg-gradient-to-none"
-          >
-            Start Review
-          </button>
-        </div>
-      </form>
-    </div>
+       {error && (
+          <p className="mt-2 text-sm text-red-600">{error}</p>
+      )}
+    </>
   );
 }

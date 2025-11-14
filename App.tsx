@@ -1,19 +1,96 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { DocumentInput } from './components/DocumentInput';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { PdfViewer } from './components/PdfViewer';
-import { LogoIcon, XCircleIcon } from './components/Icons';
-import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs";
-import { Loader } from './components/Loader';
+import { XCircleIcon } from './components/Icons';
 import * as db from './utils/db';
+import { Document, ProcessedPageData } from './types';
+import { Dashboard } from './components/Dashboard';
+import { Loader } from './components/Loader';
 
-// Set up the PDF.js worker.
-const PDF_WORKER_URL = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs";
-pdfjsLib.GlobalWorkerOptions.workerSrc = PDF_WORKER_URL;
+// FIX: Embed worker code to avoid CORS issues when loading from a different origin.
+// This code is a plain JavaScript version of the PdfProcessingWorker.ts file.
+const PDF_WORKER_CODE = `
+import * as pdfjsLib from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.min.mjs";
 
-const SESSION_KEY = 'recallReaderSession';
+pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.4.168/pdf.worker.min.mjs";
+
+const post = (message) => {
+  self.postMessage(message);
+};
+
+self.onmessage = async (event) => {
+  if (event.data.type === 'process') {
+    const file = event.data.file;
+    const docId = event.data.docId;
+    const processedData = [];
+
+    try {
+      const fileBuffer = await file.arrayBuffer();
+
+      try {
+        const typedarray = new Uint8Array(fileBuffer);
+        const doc = await pdfjsLib.getDocument({ data: typedarray }).promise;
+        const numPages = doc.numPages;
+
+        for (let i = 1; i <= numPages; i++) {
+          const page = await doc.getPage(i);
+          
+          const textContent = await page.getTextContent();
+          const pageText = textContent.items.map((item) => item.str).join(' ').trim();
+          
+          const viewport = page.getViewport({ scale: 1.5 });
+          const canvas = new OffscreenCanvas(viewport.width, viewport.height);
+          const context = canvas.getContext('2d');
+          
+          if (!context) {
+            post({ type: 'error', docId, message: 'Could not get canvas context for page ' + i });
+            return;
+          }
+
+          await page.render({ canvasContext: context, viewport }).promise;
+          
+          const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.9 });
+          
+          const blobBuffer = await blob.arrayBuffer();
+          const uint8Array = new Uint8Array(blobBuffer);
+          let binary = '';
+          for (let j = 0; j < uint8Array.byteLength; j++) {
+            binary += String.fromCharCode(uint8Array[j]);
+          }
+          const base64Data = btoa(binary);
+
+          processedData.push({
+            pageNum: i,
+            text: pageText,
+            image: base64Data
+          });
+
+          post({ type: 'progress', docId, page: i, total: numPages });
+        }
+
+        post({ type: 'complete', docId, data: processedData });
+
+      } catch (err) {
+        post({ type: 'error', docId, message: 'PDF Processing Error: ' + err.message });
+      }
+    } catch (err) {
+      post({ type: 'error', docId, message: 'Worker Error: ' + err.message });
+    }
+  }
+};
+`;
+
+type ProcessingState = {
+  status: 'idle' | 'processing' | 'error' | 'success';
+  docId: string | null;
+  progress: number;
+  total: number;
+  message: string;
+};
+
+type Theme = 'light' | 'dark';
 
 export default function App() {
-  if (!process.env.API_KEY) {
+  if (typeof process === 'undefined' || !process.env.API_KEY) {
     return (
       <div className="min-h-screen bg-red-50 flex flex-col items-center justify-center p-4">
         <div className="bg-white p-8 rounded-xl shadow-lg border border-red-200 text-center max-w-lg">
@@ -22,219 +99,202 @@ export default function App() {
           <p className="mt-2 text-md text-slate-600">
             This application requires a Gemini API key to function. The API key is missing from the environment configuration.
           </p>
-          <p className="mt-4 text-sm text-slate-500">
-            Please ensure the <code>API_KEY</code> environment variable is correctly set up before running the application.
-          </p>
         </div>
       </div>
     );
   }
 
-  const [pdfFile, setPdfFile] = useState<File | null>(null);
-  const [isProcessing, setIsProcessing] = useState<boolean>(false);
-  const [error, setError] = useState<string>('');
-  const [view, setView] = useState<'input' | 'review'>('input');
-  const [highlightText, setHighlightText] = useState<string | null>(null);
-  const [targetPage, setTargetPage] = useState<number | null>(null);
-  
-  // Session resume state
-  const [sessionChecked, setSessionChecked] = useState<boolean>(false);
-  const [savedSessionData, setSavedSessionData] = useState<any | null>(null);
+  const [documents, setDocuments] = useState<Document[]>([]);
+  const [currentDocument, setCurrentDocument] = useState<Document | null>(null);
+  const [view, setView] = useState<'loading' | 'dashboard' | 'viewer'>('loading');
+  const [theme, setTheme] = useState<Theme>('light');
+  const [processingState, setProcessingState] = useState<ProcessingState>({
+    status: 'idle',
+    docId: null,
+    progress: 0,
+    total: 0,
+    message: ''
+  });
 
-  const highlightTimeoutRef = useRef<number | null>(null);
-  const appStateRef = useRef<any>();
+  const workerRef = useRef<Worker | null>(null);
 
-  appStateRef.current = { pdfFile, view };
+   useEffect(() => {
+    const storedTheme = localStorage.getItem('theme') as Theme | null;
+    const prefersDark = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches;
+    const initialTheme = storedTheme || (prefersDark ? 'dark' : 'light');
+    setTheme(initialTheme);
+  }, []);
 
-  const saveSession = useCallback(async () => {
-    const currentState = appStateRef.current;
-    if (!currentState.pdfFile || currentState.view !== 'review') {
-      await db.deleteFile(SESSION_KEY);
-      localStorage.removeItem(SESSION_KEY);
-      return;
+  useEffect(() => {
+    if (theme === 'dark') {
+      document.documentElement.classList.add('dark');
+    } else {
+      document.documentElement.classList.remove('dark');
     }
+    localStorage.setItem('theme', theme);
+  }, [theme]);
 
+  const toggleTheme = () => {
+    setTheme(prevTheme => prevTheme === 'light' ? 'dark' : 'light');
+  };
+
+  useEffect(() => {
+    async function loadDocs() {
+      try {
+        const docs = await db.getAllDocuments();
+        setDocuments(docs);
+      } catch (e) {
+        console.error("Failed to load documents from DB", e);
+      } finally {
+        setView('dashboard');
+      }
+    }
+    loadDocs();
+  }, []);
+  
+  const refreshDocuments = useCallback(async () => {
+      try {
+        const docs = await db.getAllDocuments();
+        setDocuments(docs);
+      } catch (e) {
+        console.error("Failed to refresh documents from DB", e);
+      }
+  }, []);
+
+  useEffect(() => {
+    let worker: Worker | null = null;
+    let workerUrl: string | null = null;
     try {
-        await db.saveFile(SESSION_KEY, currentState.pdfFile);
-        const sessionData = {
-            fileData: {
-                name: currentState.pdfFile.name,
-                type: currentState.pdfFile.type,
-            },
+        const blob = new Blob([PDF_WORKER_CODE], { type: 'application/javascript' });
+        workerUrl = URL.createObjectURL(blob);
+        worker = new Worker(workerUrl, { type: 'module' });
+        workerRef.current = worker;
+
+        worker.onmessage = async (event: MessageEvent<{ type: string; docId: string; data?: any; page?: number; total?: number; message?: string }>) => {
+            const { type, docId, data, page, total, message } = event.data;
+
+            if (type === 'progress') {
+                setProcessingState({ status: 'processing', docId, progress: page!, total: total!, message: `Processing page ${page} of ${total}...` });
+            } else if (type === 'complete') {
+                try {
+                    await db.saveProcessedData(docId, data as ProcessedPageData[]);
+                    setProcessingState({ status: 'success', docId, progress: total!, total: total!, message: 'Processing complete!' });
+                    const newDoc = await db.getDocument(docId);
+                    if (newDoc) {
+                        setCurrentDocument(newDoc);
+                        setView('viewer');
+                    }
+                    await refreshDocuments();
+                } catch (err) {
+                    console.error("Failed to save processed document data:", err);
+                    setProcessingState({ status: 'error', docId, progress: 0, total: 0, message: 'Could not save the processed document.' });
+                }
+            } else if (type === 'error') {
+                setProcessingState({ status: 'error', docId, progress: 0, total: 0, message: message || 'An unknown worker error occurred.' });
+            }
         };
-        localStorage.setItem(SESSION_KEY, JSON.stringify(sessionData));
-    } catch (e) {
-        console.error("Could not save session:", e);
-        // Clean up if saving failed
-        await db.deleteFile(SESSION_KEY);
-        localStorage.removeItem(SESSION_KEY);
+        worker.onerror = (err) => {
+            console.error("Worker error:", err);
+            setProcessingState({ status: 'error', docId: null, progress: 0, total: 0, message: `A background processor error occurred: ${err.message}` });
+        };
+    } catch (err: any) {
+        console.error("Failed to create worker:", err);
+        setProcessingState({ status: 'error', docId: null, progress: 0, total: 0, message: 'Could not start the document processor.' });
     }
-  }, []);
 
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem(SESSION_KEY);
-      if (saved) {
-        setSavedSessionData(JSON.parse(saved));
+    return () => {
+      workerRef.current?.terminate();
+      if (workerUrl) URL.revokeObjectURL(workerUrl);
+    };
+  }, [refreshDocuments]);
+
+  const handleFileSelect = async (file: File) => {
+      const newDoc = await db.addDocument(file);
+      setDocuments(prev => [...prev, newDoc]);
+      
+      if (file.type === 'application/pdf') {
+          setProcessingState({ status: 'processing', docId: newDoc.id, progress: 0, total: 0, message: 'Preparing to process...' });
+          workerRef.current?.postMessage({ type: 'process', file: file, docId: newDoc.id });
+      } else if (file.type.startsWith('image/')) {
+          setProcessingState({ status: 'processing', docId: newDoc.id, progress: 0, total: 1, message: 'Processing image...' });
+          try {
+              const reader = new FileReader();
+              reader.onload = async (e) => {
+                  const base64Data = (e.target?.result as string).split(',')[1];
+                  const processedData: ProcessedPageData[] = [{ pageNum: 1, text: '', image: base64Data }];
+                  await db.saveProcessedData(newDoc.id, processedData);
+                  setProcessingState({ status: 'success', docId: newDoc.id, progress: 1, total: 1, message: 'Image processed!' });
+                  const freshDoc = await db.getDocument(newDoc.id);
+                  if (freshDoc) {
+                    setCurrentDocument(freshDoc);
+                    setView('viewer');
+                  }
+                  await refreshDocuments();
+              };
+              reader.onerror = () => { throw new Error("Could not read image file."); }
+              reader.readAsDataURL(file);
+          } catch(e) {
+               console.error(e);
+               setProcessingState({ status: 'error', docId: newDoc.id, progress: 0, total: 0, message: 'Failed to process the image.' });
+          }
       }
-    } catch (e) {
-      console.error("Failed to read saved session", e);
-      localStorage.removeItem(SESSION_KEY);
-    }
-    setSessionChecked(true);
-  }, []);
-
-  const resumeSession = async () => {
-    if (!savedSessionData) return;
-    
-    try {
-        const file = await db.loadFile(SESSION_KEY);
-        if (!file) {
-            throw new Error("File not found in the local session database.");
-        }
-
-        setPdfFile(file);
-        setView('review');
-        setSavedSessionData(null); // Clear prompt after resuming
-    } catch (e) {
-        console.error("Failed to resume session:", e);
-        setError("Could not resume the previous session. Please upload the file again.");
-        await db.deleteFile(SESSION_KEY);
-        localStorage.removeItem(SESSION_KEY);
-        setSavedSessionData(null);
-    }
   };
 
-
-  const triggerTempHighlight = (text: string | null) => {
-    if (highlightTimeoutRef.current) {
-        clearTimeout(highlightTimeoutRef.current);
-    }
-    if (!text) {
-        setHighlightText(null);
-        return;
-    }
-    setHighlightText(text);
-    highlightTimeoutRef.current = window.setTimeout(() => {
-        setHighlightText(null);
-    }, 4000); // Highlight lasts for 4 seconds
+  const handleDocumentSelect = async (doc: Document) => {
+    const updatedDoc = { ...doc, lastOpenedAt: new Date() };
+    await db.updateDocument(updatedDoc);
+    setCurrentDocument(updatedDoc);
+    setView('viewer');
+    refreshDocuments();
   };
 
-  const handleHighlightAndNavigate = (text: string | null, page: number | null) => {
-    triggerTempHighlight(text);
-    if (page) {
-        setTargetPage(page);
-    }
-  };
-
-  const handleDocumentSubmit = async (data: string | File) => {
-    setIsProcessing(true);
-    setError('');
-    setPdfFile(null);
-    triggerTempHighlight(null);
-    await db.deleteFile(SESSION_KEY);
-    localStorage.removeItem(SESSION_KEY);
-    setSavedSessionData(null);
-
-    try {
-      // This app is now PDF-focused. The string path is unlikely.
-      if (typeof data === 'string') {
-        setError("Text input is not supported. Please upload a PDF file.");
-        setView('input');
-      } else {
-        // Text extraction is now deferred, so we just set the file and switch views.
-        // This makes the initial load feel instantaneous.
-        setPdfFile(data);
-        setView('review');
-      }
-    } catch (err) {
-      console.error("Error processing document:", err);
-      setError("Failed to load the document. The file might be corrupted.");
-      setView('input');
-    } finally {
-      setIsProcessing(false);
-    }
+  const handleBackToDashboard = () => {
+    setCurrentDocument(null);
+    setView('dashboard');
+    setProcessingState({ status: 'idle', docId: null, progress: 0, total: 0, message: '' });
   };
   
-  useEffect(() => {
-    if (view === 'review' && pdfFile) {
-      saveSession();
+  const handleDeleteDocument = async (docId: string) => {
+    try {
+        await db.deleteDocument(docId);
+        await refreshDocuments();
+    } catch(e) {
+        console.error("Failed to delete document", e);
     }
-  }, [view, pdfFile, saveSession]);
+  };
 
-  const handleReset = async () => {
-    setPdfFile(null);
-    setError('');
-    setView('input');
-    triggerTempHighlight(null);
-    setSavedSessionData(null);
-    await db.deleteFile(SESSION_KEY);
-    localStorage.removeItem(SESSION_KEY);
+  const handleLoadError = (message: string) => {
+    setProcessingState({ status: 'error', docId: currentDocument?.id || null, progress: 0, total: 0, message });
+    setCurrentDocument(null);
+    setView('dashboard');
   };
   
-  const handleLoadError = async (message: string) => {
-    setError(message);
-    setPdfFile(null);
-    setView('input');
-    setSavedSessionData(null);
-    await db.deleteFile(SESSION_KEY);
-    localStorage.removeItem(SESSION_KEY);
-  };
+  if (view === 'loading') {
+    return <div className="min-h-screen bg-[var(--rr-bg-primary)] flex flex-col items-center justify-center"><Loader /></div>;
+  }
 
-  if (view === 'review' && pdfFile) {
+  if (view === 'viewer' && currentDocument) {
     return (
         <PdfViewer 
-            file={pdfFile} 
-            highlightText={highlightText} 
-            targetPage={targetPage}
-            onPageNavigated={() => setTargetPage(null)}
-            setHighlightAndNavigate={handleHighlightAndNavigate}
-            onReset={handleReset}
+            key={currentDocument.id}
+            document={currentDocument} 
+            onReset={handleBackToDashboard}
             onLoadError={handleLoadError}
+            theme={theme}
+            toggleTheme={toggleTheme}
         />
     );
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 flex flex-col">
-      <header className="w-full bg-white/80 backdrop-blur-sm border-b border-slate-200/80 sticky top-0 z-20">
-        <div className="w-full max-w-7xl mx-auto flex items-center justify-between py-3 px-4 sm:px-6 lg:px-8">
-            <div className="flex items-center gap-3">
-            <LogoIcon className="h-10 w-10" />
-            <h1 className="text-2xl sm:text-3xl font-extrabold text-blue-600 tracking-tight">
-                RecallReader
-            </h1>
-            </div>
-        </div>
-      </header>
-      
-      <main className="w-full max-w-7xl mx-auto flex-1 px-4 sm:px-6 lg:px-8 py-8 flex flex-col">
-        <div className="flex-1 min-h-0">
-          {view === 'input' && sessionChecked && (
-            <div className="flex justify-center pt-8">
-              <DocumentInput 
-                onSubmit={handleDocumentSubmit} 
-                savedSessionData={savedSessionData}
-                onResumeSession={resumeSession}
-                onClearSavedSession={async () => {
-                    await db.deleteFile(SESSION_KEY);
-                    localStorage.removeItem(SESSION_KEY);
-                    setSavedSessionData(null);
-                }}
-              />
-            </div>
-          )}
-          {isProcessing && (
-             <div className="text-center p-8 h-full flex flex-col justify-center items-center">
-                <Loader />
-                <p className="mt-4 text-slate-600 font-semibold">Loading Document...</p>
-             </div>
-          )}
-          {error && view === 'input' && (
-             <p className="mt-4 text-center text-red-600 bg-red-50 p-3 rounded-md">{error}</p>
-          )}
-        </div>
-      </main>
-    </div>
+    <Dashboard 
+        documents={documents}
+        onDocumentSelect={handleDocumentSelect}
+        onFileSelect={handleFileSelect}
+        onDeleteDocument={handleDeleteDocument}
+        processingState={processingState}
+        theme={theme}
+        toggleTheme={toggleTheme}
+    />
   );
 }

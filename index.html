@@ -14,32 +14,62 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>RecallReader</title>
+    <meta name="theme-color" content="#2563eb">
+    <link rel="manifest" href="/manifest.json" />
     <script src="https://cdn.tailwindcss.com"></script>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <script>
+      tailwind.config = {
+        darkMode: 'class',
+      }
+    </script>
     <style>
+      :root {
+        --rr-bg-primary: #f8fafc; /* slate-50 */
+        --rr-bg-secondary: #f1f5f9; /* slate-100 */
+        --rr-bg-tertiary: #e2e8f0; /* slate-200 */
+        --rr-bg-inverse: #1e293b; /* slate-800 */
+        --rr-text-primary: #0f172a; /* slate-900 */
+        --rr-text-secondary: #475569; /* slate-600 */
+        --rr-border-primary: #e2e8f0; /* slate-200 */
+        --rr-border-secondary: #cbd5e1; /* slate-300 */
+        --rr-brand-primary: #2563eb; /* blue-600 */
+        --rr-brand-secondary: #3b82f6; /* blue-500 */
+      }
+      html.dark {
+        --rr-bg-primary: #0f172a; /* slate-900 */
+        --rr-bg-secondary: #1e293b; /* slate-800 */
+        --rr-bg-tertiary: #334155; /* slate-700 */
+        --rr-bg-inverse: #f1f5f9; /* slate-100 */
+        --rr-text-primary: #f1f5f9; /* slate-100 */
+        --rr-text-secondary: #94a3b8; /* slate-400 */
+        --rr-border-primary: #334155; /* slate-700 */
+        --rr-border-secondary: #475569; /* slate-600 */
+        --rr-brand-primary: #3b82f6; /* blue-500 */
+        --rr-brand-secondary: #60a5fa; /* blue-400 */
+      }
       body {
         font-family: 'Inter', sans-serif;
         -webkit-font-smoothing: antialiased;
         -moz-osx-font-smoothing: grayscale;
+        background-color: var(--rr-bg-primary);
+        color: var(--rr-text-primary);
       }
       .brand-gradient {
-        background: linear-gradient(to right, #2563eb, #3b82f6); /* blue-600 to blue-500 */
+        background: linear-gradient(to right, var(--rr-brand-primary), var(--rr-brand-secondary));
         -webkit-background-clip: text;
         -webkit-text-fill-color: transparent;
       }
       .textLayer {
         position: absolute;
-        left: 0;
-        top: 0;
-        right: 0;
-        bottom: 0;
+        left: 0; top: 0; right: 0; bottom: 0;
         overflow: hidden;
+        opacity: 0.2;
+        line-height: 1.0;
       }
-      .textLayer ::selection {
-        background: rgba(59, 130, 246, 0.3); /* blue-500 */
-      }
+      .textLayer ::selection { background: rgba(59, 130, 246, 0.4); }
       .textLayer > span {
         color: transparent;
         position: absolute;
@@ -48,58 +78,39 @@
         transform-origin: 0% 0%;
       }
       @keyframes fade-out-highlight {
-        0%, 70% { /* Hold color for ~2.8s */
-          background-color: rgba(253, 224, 71, 0.7); /* yellow-300 */
-          box-shadow: 0 0 5px rgba(253, 224, 71, 0.9);
-        }
-        100% {
-          background-color: transparent;
-          box-shadow: 0 0 5px transparent;
-        }
+        0%, 70% { background-color: rgba(253, 224, 71, 0.7); box-shadow: 0 0 5px rgba(253, 224, 71, 0.9); }
+        100% { background-color: transparent; box-shadow: 0 0 5px transparent; }
       }
-
-      .temporary-highlight {
-        animation: fade-out-highlight 4s ease-out forwards;
-        border-radius: 2px;
-        pointer-events: none;
-      }
+      .temporary-highlight { animation: fade-out-highlight 4s ease-out forwards; border-radius: 2px; pointer-events: none; }
+      mark.search-highlight { background-color: rgba(250, 204, 21, 0.4); border-radius: 2px; }
+      mark.current-search-highlight { background-color: rgba(249, 115, 22, 0.6); box-shadow: 0 0 3px rgba(249, 115, 22, 0.8); }
+      .annotation-highlight { position: absolute; background-color: rgba(59, 130, 246, 0.3); border-radius: 2px; pointer-events: none; }
       
-      mark.search-highlight, .search-highlight {
-        background-color: rgba(250, 204, 21, 0.4); /* yellow-400 */
-        border-radius: 2px;
-        transition: background-color 0.3s ease;
-      }
-      mark.current-search-highlight, .current-search-highlight {
-        background-color: rgba(249, 115, 22, 0.6); /* orange-500 */
-        box-shadow: 0 0 3px rgba(249, 115, 22, 0.8);
-      }
-      
-      /* Animations for mobile drawers */
-      @keyframes slide-in-left {
-        from { transform: translateX(-100%); }
-        to { transform: translateX(0); }
-      }
-      .animate-slide-in-left {
-        animation: slide-in-left 0.3s ease-out forwards;
-      }
-      @keyframes slide-in-right {
-        from { transform: translateX(100%); }
-        to { transform: translateX(0); }
-      }
-      .animate-slide-in-right {
-        animation: slide-in-right 0.3s ease-out forwards;
-      }
-      @keyframes fade-in {
-        from { opacity: 0; }
-        to { opacity: 1; }
-      }
-      .animate-fade-in {
-        animation: fade-in 0.3s ease-out forwards;
-      }
+      /* Animations */
+      @keyframes slide-in-left { from { transform: translateX(-100%); } to { transform: translateX(0); } }
+      .animate-slide-in-left { animation: slide-in-left 0.3s ease-out forwards; }
+      @keyframes slide-in-right { from { transform: translateX(100%); } to { transform: translateX(0); } }
+      .animate-slide-in-right { animation: slide-in-right 0.3s ease-out forwards; }
+      @keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+      .animate-fade-in { animation: fade-in 0.3s ease-out forwards; }
+      @keyframes pop-in { from { opacity: 0; transform: scale(0.95); } to { opacity: 1; transform: scale(1); } }
+      .animate-pop-in { animation: pop-in 0.2s ease-out forwards; }
     </style>
   </head>
   <body>
+    <noscript>You need to enable JavaScript to run this app.</noscript>
     <div id="root"></div>
     <script type="module" src="/index.tsx"></script>
+    <script>
+      if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+          navigator.serviceWorker.register('/sw.js').then(registration => {
+            console.log('SW registered: ', registration);
+          }).catch(registrationError => {
+            console.log('SW registration failed: ', registrationError);
+          });
+        });
+      }
+    </script>
   </body>
 </html>

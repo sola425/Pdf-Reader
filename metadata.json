@@ -2,6 +2,7 @@
   "name": "RecallReader",
   "description": "An application that allows users to upload a document, record a voice summary, and receive an AI-powered score and review on their comprehension and recall of the document's content.",
   "requestFramePermissions": [
-    "microphone"
+    "microphone",
+    "camera"
   ]
 }
