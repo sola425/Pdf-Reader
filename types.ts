@@ -12,6 +12,11 @@ export interface Document {
   name: string;
   createdAt: Date;
   lastOpenedAt: Date;
+  processingStatus: 'pending' | 'processing' | 'completed' | 'failed';
+  processedPages: number;
+  totalPages?: number;
+  lastScrollTop?: number;
+  lastScale?: number;
 }
 
 export interface Rect {
@@ -37,12 +42,38 @@ export interface QuizQuestion {
   topic: string;
 }
 
+export interface StudyTopicProgress {
+  topic: string;
+  correct: number;
+  total: number;
+  lastReviewed: Date;
+}
+
 export interface StudyProgress {
   docId: string;
-  progress: {
-    topic: string;
-    correct: number;
-    total: number;
-    lastReviewed: Date;
-  }[];
+  progress: StudyTopicProgress[];
+}
+
+
+export interface MissedPoint {
+  topic: string;
+  quoteFromDocument: string;
+  pageNum: number;
+}
+
+export interface RecallAnalysisResult {
+  score: {
+    recall: number; // 0-100
+    accuracy: number; // 0-100
+  };
+  feedback: string;
+  missedPoints: MissedPoint[];
+}
+
+export interface Flashcard {
+  id: string;
+  docId: string;
+  term: string;
+  definition: string;
+  pageNum: number;
 }

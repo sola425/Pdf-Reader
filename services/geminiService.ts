@@ -1,12 +1,14 @@
+
 import { GoogleGenAI, Modality, LiveServerMessage, Chat, Part, FunctionDeclaration, Type } from "@google/genai";
 import { encode } from '../utils/audio';
-import { QuizQuestion } from "../types";
+import { QuizQuestion, RecallAnalysisResult, Flashcard, StudyProgress } from "../types";
 
 let ai: GoogleGenAI | null = null;
 
 function getAiInstance(): GoogleGenAI {
     if (!ai) {
-        if (typeof process === 'undefined' || !process.env.API_KEY) {
+        // FIX: Made the API key check more robust to prevent a `ReferenceError` if the `process` object is not defined. This check safely handles undeclared, null, and other falsy cases.
+        if (typeof process === 'undefined' || !process || !process.env || !process.env.API_KEY) {
             throw new Error("Gemini API key not found. Please set the API_KEY environment variable.");
         }
         ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
@@ -54,9 +56,18 @@ const quizQuestionSchema = {
     required: ['question', 'topic', 'options', 'answer'],
 };
 
-export async function generateQuiz(contextParts: Part[]): Promise<QuizQuestion[]> {
+export async function generateQuiz(contextParts: Part[], numQuestions: number, studyProgress?: StudyProgress | null): Promise<QuizQuestion[]> {
     const aiInstance = getAiInstance();
-    const prompt = `Based on the following document content (text and images), generate 5 distinct multiple-choice questions to test understanding of the key concepts. Each question should have 4 options, with only one correct answer. Ensure the questions cover different topics from the text.`;
+    
+    let progressSummary = '';
+    if (studyProgress && studyProgress.progress.length > 0) {
+        progressSummary = 'The user has previously been quizzed on these topics with the following performance (correct/total):\n' +
+            studyProgress.progress.map(p => `- ${p.topic}: ${p.correct}/${p.total}`).join('\n') +
+            '\nBased on this, generate some more challenging questions for topics the user has mastered and more foundational questions for topics they are struggling with.';
+    }
+
+    const prompt = `Based on the following document content (text and images), generate ${numQuestions} distinct multiple-choice questions to test understanding of the key concepts. Each question should have 4 options, with only one correct answer. Ensure the questions cover different topics from the text.
+    ${progressSummary}`;
     
     const response = await aiInstance.models.generateContent({
         model: 'gemini-2.5-flash',
@@ -82,6 +93,53 @@ export async function generateQuiz(contextParts: Part[]): Promise<QuizQuestion[]
     } catch (e) {
         console.error("Failed to parse quiz JSON:", e);
         throw new Error("The AI returned an invalid quiz format.");
+    }
+}
+
+const flashcardSchema = {
+    type: Type.OBJECT,
+    properties: {
+        term: { type: Type.STRING, description: 'A question, key term, or concept for the front of the flashcard. Should be concise.' },
+        definition: { type: Type.STRING, description: 'A comprehensive but clear answer or explanation for the back of the flashcard.' },
+        pageNum: { type: Type.NUMBER, description: 'The page number where this term is most relevant or first introduced.' },
+    },
+    required: ['term', 'definition', 'pageNum'],
+};
+
+export async function generateFlashcards(contextParts: Part[], numFlashcards: number): Promise<Omit<Flashcard, 'id' | 'docId'>[]> {
+    const aiInstance = getAiInstance();
+    const prompt = `You are an expert study guide creator. Your task is to create ${numFlashcards} highly effective flashcards based on the provided document content. These flashcards should go beyond simple definitions. Focus on:
+- Core concepts and their significance.
+- Cause-and-effect relationships.
+- Key figures and their contributions.
+- Critical comparisons or contrasts presented in the text.
+
+For each flashcard, provide a clear "term" (which can be a question) and a comprehensive "definition" (the answer). Also, pinpoint the page number where the concept is most clearly explained.`;
+    
+    const response = await aiInstance.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: { parts: [{text: prompt}, ...contextParts] },
+        config: {
+            responseMimeType: 'application/json',
+            responseSchema: {
+                type: Type.OBJECT,
+                properties: {
+                    flashcards: {
+                        type: Type.ARRAY,
+                        items: flashcardSchema,
+                    },
+                },
+            },
+        },
+    });
+
+    const jsonText = response.text;
+    try {
+        const parsed = JSON.parse(jsonText);
+        return parsed.flashcards as Omit<Flashcard, 'id' | 'docId'>[];
+    } catch (e) {
+        console.error("Failed to parse flashcards JSON:", e, "Raw text:", jsonText);
+        throw new Error("The AI returned an invalid flashcard format.");
     }
 }
 
@@ -161,4 +219,69 @@ Your responses will be spoken, so keep them conversational and not too long.`;
 
     const session = await sessionPromise;
     return { session, stream, context, scriptProcessor, source };
+}
+
+const recallAnalysisSchema = {
+    type: Type.OBJECT,
+    properties: {
+        score: {
+            type: Type.OBJECT,
+            properties: {
+                recall: { type: Type.NUMBER, description: 'A score from 0-100 representing how much of the key information the user mentioned.' },
+                accuracy: { type: Type.NUMBER, description: 'A score from 0-100 representing how accurate the user\'s statements were compared to the document.' },
+            },
+            required: ['recall', 'accuracy'],
+        },
+        feedback: { type: Type.STRING, description: 'A paragraph of constructive feedback for the user, summarizing their performance and suggesting areas for improvement.' },
+        missedPoints: {
+            type: Type.ARRAY,
+            items: {
+                type: Type.OBJECT,
+                properties: {
+                    topic: { type: Type.STRING, description: 'A short, one or two-word topic for the missed point (e.g., "Mitochondria\'s Function").' },
+                    quoteFromDocument: { type: Type.STRING, description: 'A brief, verbatim quote from the source document that illustrates the missed point.' },
+                    pageNum: { type: Type.NUMBER, description: 'The page number where this quote can be found.' },
+                },
+                required: ['topic', 'quoteFromDocument', 'pageNum'],
+            },
+            description: 'An array of 3-5 key concepts the user failed to mention.'
+        }
+    },
+    required: ['score', 'feedback', 'missedPoints'],
+};
+
+
+export async function analyzeRecall(contextParts: Part[], userSummary: string): Promise<RecallAnalysisResult> {
+    const aiInstance = getAiInstance();
+    const prompt = `You are a study assessment AI. Your task is to analyze a user's spoken summary against a source document. The document content, including page numbers, is provided first. This is followed by the user's transcribed summary.
+
+Analyze the user's summary based *only* on the provided document content.
+
+Your analysis should perform the following steps:
+1.  **Evaluate Recall and Accuracy:** Compare the user's summary to the key points in the document. Assign a score from 0-100 for recall (how much key information was covered) and accuracy (how correct the information was).
+2.  **Provide Constructive Feedback:** Write a helpful, encouraging paragraph summarizing what the user did well and where they can improve.
+3.  **Identify Missed Key Points:** Find 3-5 of the most important concepts or facts from the document that the user did not mention. For each missed point, provide a short topic, a direct quote from the document illustrating the point, and the page number where that quote is located.
+
+The user's summary is:
+---
+${userSummary}
+---
+`;
+    
+    const response = await aiInstance.models.generateContent({
+        model: 'gemini-2.5-flash',
+        contents: { parts: [{text: prompt}, ...contextParts] },
+        config: {
+            responseMimeType: 'application/json',
+            responseSchema: recallAnalysisSchema,
+        },
+    });
+
+    const jsonText = response.text;
+    try {
+        return JSON.parse(jsonText) as RecallAnalysisResult;
+    } catch (e) {
+        console.error("Failed to parse recall analysis JSON:", e, "Raw text:", jsonText);
+        throw new Error("The AI returned an invalid analysis format.");
+    }
 }

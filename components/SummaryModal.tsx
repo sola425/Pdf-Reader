@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useCallback } from 'react';
 import { Part } from '@google/genai';
 import { getSummary } from '../services/geminiService';
@@ -60,30 +59,51 @@ export function SummaryModal({ isOpen, onClose, documentId, startPage, endPage }
 
   if (!isOpen) return null;
   
-  // Basic markdown renderer
   const renderMarkdown = (text: string) => {
-    return text.split('\n').map((line, index) => {
-      if (line.startsWith('* ')) {
-        return <li key={index} className="ml-4 list-disc">{line.substring(2)}</li>;
-      }
-      if (line.match(/^\d+\./)) {
-        return <li key={index} className="ml-4 list-decimal">{line.replace(/^\d+\.\s*/, '')}</li>;
-      }
-      return <p key={index}>{line}</p>;
+    const elements: React.ReactNode[] = [];
+    let listItems: React.ReactNode[] = [];
+    const lines = text.split('\n');
+
+    const flushList = () => {
+        if (listItems.length > 0) {
+            elements.push(<ul key={`ul-${elements.length}`} className="list-disc pl-5 space-y-1">{listItems}</ul>);
+            listItems = [];
+        }
+    };
+
+    const parseLine = (line: string, key: any) => {
+        const parts = line.split(/(\*\*.*?\*\*)/g).filter(Boolean);
+        return <>{parts.map((part, i) => part.startsWith('**') && part.endsWith('**') ? <strong key={i}>{part.slice(2, -2)}</strong> : part)}</>;
+    };
+
+    lines.forEach((line, index) => {
+        if (line.trim().startsWith('* ') || line.trim().startsWith('- ')) {
+            const content = line.trim().substring(2);
+            listItems.push(<li key={index}>{parseLine(content, index)}</li>);
+        } else {
+            flushList();
+            if (line.trim()) {
+                elements.push(<p key={index}>{parseLine(line, index)}</p>);
+            }
+        }
     });
+
+    flushList(); // Add any remaining list items
+    return elements;
   };
+
 
   return (
     <div className="fixed inset-0 z-40 flex items-center justify-center p-4 bg-black/50 animate-fade-in" role="dialog" aria-modal="true" aria-labelledby="summary-title">
-        <div className="bg-white rounded-xl shadow-2xl w-full max-w-2xl h-auto max-h-[80vh] flex flex-col">
-            <header className="p-4 border-b border-slate-200 flex items-center justify-between flex-shrink-0">
+        <div className="bg-white dark:bg-slate-800 rounded-xl shadow-2xl w-full max-w-2xl h-auto max-h-[80vh] flex flex-col">
+            <header className="p-4 border-b border-slate-200 dark:border-slate-700 flex items-center justify-between flex-shrink-0">
                 <div className="flex items-center gap-2">
                     <SparklesIcon className="w-6 h-6 text-indigo-500" />
-                    <h2 id="summary-title" className="text-lg font-bold text-slate-800">
+                    <h2 id="summary-title" className="text-lg font-bold text-slate-800 dark:text-slate-100">
                         AI Summary of Pages {startPage} - {endPage}
                     </h2>
                 </div>
-                <button onClick={onClose} className="p-2 rounded-full hover:bg-slate-200" aria-label="Close summary">
+                <button onClick={onClose} className="p-2 rounded-full hover:bg-slate-200 dark:hover:bg-slate-700" aria-label="Close summary">
                     <XIcon className="w-6 h-6 text-slate-600" />
                 </button>
             </header>
@@ -91,22 +111,22 @@ export function SummaryModal({ isOpen, onClose, documentId, startPage, endPage }
                 {isLoading && (
                     <div className="text-center">
                         <Loader />
-                        <p className="mt-4 text-slate-600">Generating summary...</p>
+                        <p className="mt-4 text-slate-600 dark:text-slate-400">Generating summary...</p>
                     </div>
                 )}
                 {error && (
-                    <div className="p-3 text-red-800 bg-red-100 border border-red-200 rounded-lg flex items-center gap-2">
+                    <div className="p-3 text-red-800 bg-red-100 dark:bg-red-200 border border-red-200 rounded-lg flex items-center gap-2">
                         <XCircleIcon className="w-5 h-5 flex-shrink-0" />
                         <span>Error: {error}</span>
                     </div>
                 )}
                 {summary && (
-                    <div className="prose prose-sm max-w-none">
+                    <div className="text-sm text-slate-700 dark:text-slate-300 space-y-3">
                         {renderMarkdown(summary)}
                     </div>
                 )}
             </div>
-             <footer className="p-4 border-t border-slate-200 flex-shrink-0 text-right">
+             <footer className="p-4 border-t border-slate-200 dark:border-slate-700 flex-shrink-0 text-right">
                 <button 
                     onClick={onClose} 
                     className="px-4 py-2 bg-slate-600 text-white font-semibold rounded-md hover:bg-slate-700"

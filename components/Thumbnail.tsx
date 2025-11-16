@@ -1,15 +1,18 @@
 import React, { useState, useEffect, useRef } from 'react';
+import { ProcessedPageData } from '../types';
 
 interface ThumbnailProps {
-    pdfDoc: any;
+    pdfDoc: any | null;
     pageNum: number;
+    pageData?: ProcessedPageData;
     cachedThumb: string | null;
     onThumbGenerated: (pageNum: number, dataUrl: string) => void;
     onClick: () => void;
     isActive: boolean;
+    scrollContainerRef: React.RefObject<HTMLDivElement>;
 }
 
-const MemoizedThumbnail = React.memo(({ pdfDoc, pageNum, cachedThumb, onThumbGenerated, onClick, isActive }: ThumbnailProps) => {
+const MemoizedThumbnail = React.memo(({ pdfDoc, pageNum, pageData, cachedThumb, onThumbGenerated, onClick, isActive, scrollContainerRef }: ThumbnailProps) => {
     const [isLoading, setIsLoading] = useState(!cachedThumb);
     const thumbRef = useRef<HTMLDivElement>(null);
     const [isIntersecting, setIsIntersecting] = useState(false);
@@ -22,7 +25,10 @@ const MemoizedThumbnail = React.memo(({ pdfDoc, pageNum, cachedThumb, onThumbGen
                     observer.disconnect(); // Observe only once
                 }
             },
-            { rootMargin: '200px 0px 200px 0px' } // Pre-load thumbnails slightly outside the viewport
+            { 
+                root: scrollContainerRef.current,
+                rootMargin: '200px 0px 200px 0px' 
+            }
         );
 
         const currentRef = thumbRef.current;
@@ -35,7 +41,7 @@ const MemoizedThumbnail = React.memo(({ pdfDoc, pageNum, cachedThumb, onThumbGen
                 observer.unobserve(currentRef);
             }
         };
-    }, []);
+    }, [scrollContainerRef]);
 
     useEffect(() => {
         let isMounted = true;
@@ -44,20 +50,25 @@ const MemoizedThumbnail = React.memo(({ pdfDoc, pageNum, cachedThumb, onThumbGen
                 if (!isMounted) return;
                 setIsLoading(true);
                 try {
-                    const page = await pdfDoc.getPage(pageNum);
-                    const THUMBNAIL_WIDTH = 120;
-                    const viewport = page.getViewport({ scale: 1 });
-                    const scale = THUMBNAIL_WIDTH / viewport.width;
-                    const thumbViewport = page.getViewport({ scale });
-                    
-                    const tempCanvas = document.createElement('canvas');
-                    tempCanvas.width = thumbViewport.width;
-                    tempCanvas.height = thumbViewport.height;
-                    const canvasContext = tempCanvas.getContext('2d')!;
-                    
-                    await page.render({ canvasContext, viewport: thumbViewport }).promise;
-                    if (isMounted) {
-                        onThumbGenerated(pageNum, tempCanvas.toDataURL());
+                    if (pdfDoc) {
+                        const page = await pdfDoc.getPage(pageNum);
+                        const THUMBNAIL_WIDTH = 120;
+                        const viewport = page.getViewport({ scale: 1 });
+                        const scale = THUMBNAIL_WIDTH / viewport.width;
+                        const thumbViewport = page.getViewport({ scale });
+                        
+                        const tempCanvas = document.createElement('canvas');
+                        tempCanvas.width = thumbViewport.width;
+                        tempCanvas.height = thumbViewport.height;
+                        const canvasContext = tempCanvas.getContext('2d')!;
+                        
+                        await page.render({ canvasContext, viewport: thumbViewport }).promise;
+                        if (isMounted) {
+                            onThumbGenerated(pageNum, tempCanvas.toDataURL());
+                        }
+                    } else if (pageData?.image) {
+                        // For non-PDF files, use the already processed image data
+                        onThumbGenerated(pageNum, `data:image/jpeg;base64,${pageData.image}`);
                     }
                 } catch (e) {
                     console.error(`Failed to generate thumbnail for page ${pageNum}`, e);
@@ -75,7 +86,7 @@ const MemoizedThumbnail = React.memo(({ pdfDoc, pageNum, cachedThumb, onThumbGen
         return () => {
             isMounted = false;
         }
-    }, [pdfDoc, pageNum, cachedThumb, onThumbGenerated, isIntersecting]);
+    }, [pdfDoc, pageNum, pageData, cachedThumb, onThumbGenerated, isIntersecting]);
 
     return (
         <div 
